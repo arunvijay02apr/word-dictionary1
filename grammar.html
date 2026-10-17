@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Grammar Check</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#1f2937; --muted:#6b7280; --accent:#16a34a; --card:#f3f4f6; --add:#bbf7d0; --del:#fecaca; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1f1f1f; --fg:#e5e7eb; --muted:#9ca3af; --accent:#22c55e; --card:#2b2b2b; --add:#14532d; --del:#7f1d1d; } }
+  body { font-family:"Segoe UI",Arial,sans-serif; margin:0; padding:12px; background:var(--bg); color:var(--fg); font-size:14px; }
+  label { display:block; margin-top:8px; color:var(--muted); font-size:12px; }
+  input,select { width:100%; box-sizing:border-box; padding:6px; border:1px solid var(--muted); border-radius:4px; background:var(--bg); color:var(--fg); }
+  input[type=checkbox] { width:auto; }
+  button { padding:8px 12px; border:0; border-radius:4px; background:var(--accent); color:#fff; cursor:pointer; margin-top:10px; margin-right:6px; }
+  button.sec { background:var(--muted); }
+  details { background:var(--card); border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+  .box { background:var(--card); border-radius:6px; padding:10px; margin-top:10px; white-space:pre-wrap; line-height:1.5; }
+  ins { background:var(--add); text-decoration:none; } del { background:var(--del); }
+  .chg { margin:6px 0; } .why { color:var(--muted); font-size:12px; }
+  #status { color:var(--muted); margin-top:8px; }
+</style>
+</head>
+<body>
+<details id="settings">
+  <summary>Settings</summary>
+  <label>AI provider</label>
+  <select id="provider"><option value="groq">Groq (free tier)</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama (local, on this PC)</option></select>
+  <label>API key (stored only in this PC's Word, never uploaded)</label>
+  <input id="key" type="password" placeholder="Paste your API key">
+  <label>Model (change if the provider retires it)</label>
+  <input id="model">
+  <label>Spelling style</label>
+  <select id="english"><option value="keep">Keep as written</option><option value="uk">British English</option><option value="us">American English</option></select>
+  <label><input type="checkbox" id="track"> Apply corrections as tracked changes</label>
+</details>
+
+<button id="check">Check selected text</button>
+<div id="status">Select a paragraph in your document, then click the button.</div>
+<div id="result"></div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const DEFAULT_MODEL = { groq:"llama-3.3-70b-versatile", gemini:"gemini-2.0-flash", ollama:"llama3.1" };
+  let cfg = { provider:"groq", key:"", model:"", english:"keep", track:true };
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem("gcfg") || "{}")); } catch (e) {}
+  let corrected = "";
+
+  function applyCfgToUI() {
+    $("provider").value = cfg.provider; $("key").value = cfg.key;
+    $("model").value = cfg.model || DEFAULT_MODEL[cfg.provider];
+    $("english").value = cfg.english; $("track").checked = cfg.track;
+  }
+  function saveCfg() {
+    cfg = { provider:$("provider").value, key:$("key").value.trim(), model:$("model").value.trim(),
+            english:$("english").value, track:$("track").checked };
+    try { localStorage.setItem("gcfg", JSON.stringify(cfg)); } catch (e) {}
+  }
+  ["key","model","english","track"].forEach(id => $(id).addEventListener("change", saveCfg));
+  $("provider").addEventListener("change", () => { $("model").value = DEFAULT_MODEL[$("provider").value]; saveCfg(); });
+  applyCfgToUI();
+  if (!cfg.key && cfg.provider !== "ollama") $("settings").open = true;
+
+  function systemPrompt() {
+    const eng = { keep:"Keep the author's spelling style (do not switch between British and American).",
+                  uk:"Use British English spelling.", us:"Use American English spelling." }[cfg.english];
+    return "You are a careful proofreader for professional English documents, including medical and medico-legal reports. " +
+      "Fix grammar, spelling, punctuation and obvious typos with minimal edits. " +
+      "Never change meaning, medical terms, drug names, doses, numbers, dates, names or measurements. " +
+      "Keep paragraph breaks. " + eng + " Respond ONLY with JSON: " +
+      '{"corrected": "<full corrected text>", "changes": [{"from": "...", "to": "...", "reason": "..."}]}. ' +
+      "If nothing needs fixing, return the original text and an empty changes array.";
+  }
+
+  async function callAI(text) {
+    const sys = systemPrompt(), model = cfg.model || DEFAULT_MODEL[cfg.provider];
+    let r, raw;
+    if (cfg.provider === "groq") {
+      r = await fetch("https://api.groq.com/openai/v1/chat/completions", { method:"POST",
+        headers:{ "Content-Type":"application/json", "Authorization":"Bearer " + cfg.key },
+        body: JSON.stringify({ model, temperature:0, response_format:{ type:"json_object" },
+          messages:[{ role:"system", content:sys }, { role:"user", content:text }] }) });
+      if (!r.ok) throw new Error("Groq " + r.status + ": " + (await r.text()).slice(0, 200));
+      raw = (await r.json()).choices[0].message.content;
+    } else if (cfg.provider === "gemini") {
+      r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) +
+        ":generateContent?key=" + encodeURIComponent(cfg.key), { method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ systemInstruction:{ parts:[{ text:sys }] },
+          contents:[{ role:"user", parts:[{ text }] }],
+          generationConfig:{ temperature:0, responseMimeType:"application/json" } }) });
+      if (!r.ok) throw new Error("Gemini " + r.status + ": " + (await r.text()).slice(0, 200));
+      raw = (await r.json()).candidates[0].content.parts[0].text;
+    } else {
+      r = await fetch("http://localhost:11434/api/chat", { method:"POST",
+        body: JSON.stringify({ model, stream:false, format:"json", options:{ temperature:0 },
+          messages:[{ role:"system", content:sys }, { role:"user", content:text }] }) });
+      if (!r.ok) throw new Error("Ollama " + r.status + ": " + (await r.text()).slice(0, 200));
+      raw = (await r.json()).message.content;
+    }
+    return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim());
+  }
+
+  function diffHtml(a, b) {
+    const A = a.split(/(\s+)/), B = b.split(/(\s+)/), n = A.length, m = B.length;
+    const dp = Array.from({ length:n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = A[i] === B[j] ? dp[i+1][j+1] + 1 : Math.max(dp[i+1][j], dp[i][j+1]);
+    let i = 0, j = 0, h = "";
+    while (i < n && j < m) {
+      if (A[i] === B[j]) { h += esc(A[i]); i++; j++; }
+      else if (dp[i+1][j] >= dp[i][j+1]) { h += "<del>" + esc(A[i]) + "</del>"; i++; }
+      else { h += "<ins>" + esc(B[j]) + "</ins>"; j++; }
+    }
+    while (i < n) h += "<del>" + esc(A[i++]) + "</del>";
+    while (j < m) h += "<ins>" + esc(B[j++]) + "</ins>";
+    return h.replace(/<\/del><del>/g, "").replace(/<\/ins><ins>/g, "");
+  }
+
+  async function getSelectionText() {
+    return Word.run(async ctx => { const s = ctx.document.getSelection(); s.load("text"); await ctx.sync(); return s.text; });
+  }
+
+  $("check").onclick = async () => {
+    saveCfg(); $("result").innerHTML = ""; corrected = "";
+    if (cfg.provider !== "ollama" && !cfg.key) { $("status").textContent = "Add your API key in Settings first."; $("settings").open = true; return; }
+    try {
+      const text = (await getSelectionText()).trim();
+      if (!text) { $("status").textContent = "Nothing selected. Select a paragraph first."; return; }
+      if (text.length > 8000) { $("status").textContent = "Selection is too long (over 8000 characters). Select a smaller part."; return; }
+      $("status").textContent = "Checking..."; const t0 = performance.now();
+      const res = await callAI(text);
+      corrected = String(res.corrected || text);
+      const changes = Array.isArray(res.changes) ? res.changes : [];
+      $("status").textContent = (changes.length ? changes.length + " change(s) suggested" : "No corrections needed") +
+                                " · " + Math.round(performance.now() - t0) + " ms";
+      let h = '<div class="box">' + diffHtml(text, corrected) + "</div>";
+      changes.forEach(c => { h += '<div class="chg">' + esc(c.from) + " → <b>" + esc(c.to) +
+                                   '</b><div class="why">' + esc(c.reason || "") + "</div></div>"; });
+      if (changes.length) h += '<button id="apply">Replace selection</button><button id="copy" class="sec">Copy corrected</button>' +
+                               '<div class="why">Replacing keeps text but may reset formatting inside the selection.</div>';
+      $("result").innerHTML = h;
+      if ($("apply")) {
+        $("apply").onclick = async () => {
+          try {
+            await Word.run(async ctx => {
+              if (cfg.track) { try { ctx.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll; await ctx.sync(); } catch (e) {} }
+              ctx.document.getSelection().insertText(corrected, "Replace"); await ctx.sync();
+            });
+            $("status").textContent = "Replaced.";
+          } catch (e) { $("status").textContent = "Could not replace: " + e.message; }
+        };
+        $("copy").onclick = async () => { try { await navigator.clipboard.writeText(corrected); $("status").textContent = "Copied."; } catch (e) { $("status").textContent = "Copy failed."; } };
+      }
+    } catch (e) { $("status").textContent = "Error: " + e.message; }
+  };
+
+  if (typeof Office !== "undefined" && Office.onReady) Office.onReady();
+</script>
+</body>
+</html>
