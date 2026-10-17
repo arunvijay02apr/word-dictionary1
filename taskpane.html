@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quick Dictionary</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#1f2937; --muted:#6b7280; --accent:#2563eb; --card:#f3f4f6; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1f1f1f; --fg:#e5e7eb; --muted:#9ca3af; --accent:#60a5fa; --card:#2b2b2b; } }
+  body { font-family: "Segoe UI", Arial, sans-serif; margin:0; padding:12px; background:var(--bg); color:var(--fg); font-size:14px; }
+  .search { display:flex; gap:6px; margin-bottom:12px; }
+  input { flex:1; padding:6px 8px; border:1px solid var(--muted); border-radius:4px; background:var(--bg); color:var(--fg); }
+  button { padding:6px 10px; border:0; border-radius:4px; background:var(--accent); color:#fff; cursor:pointer; }
+  h1 { font-size:22px; margin:0 0 2px; }
+  .phon { color:var(--muted); margin-bottom:10px; }
+  .pos { font-style:italic; color:var(--accent); margin:12px 0 4px; font-weight:600; }
+  .def { background:var(--card); border-radius:6px; padding:8px 10px; margin-bottom:6px; }
+  .ex { color:var(--muted); font-style:italic; margin-top:4px; }
+  .hint { color:var(--muted); }
+  audio { margin-top:6px; width:100%; height:32px; }
+</style>
+</head>
+<body>
+<div class="search">
+  <input id="q" type="text" placeholder="Type a word or select one in the document">
+  <button id="go">Go</button>
+</div>
+<div id="out" class="hint">Select or double-click a word in your document.</div>
+
+<script>
+  let lastWord = "", timer = null;
+  const out = document.getElementById("out");
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+  async function lookup(word) {
+    out.className = "hint"; out.textContent = "Looking up \"" + word + "\"...";
+    try {
+      const r = await fetch("https://api.dictionaryapi.dev/api/v2/entries/en/" + encodeURIComponent(word));
+      if (!r.ok) { out.textContent = "No definition found for \"" + word + "\"."; return; }
+      render(await r.json());
+    } catch (e) { out.textContent = "Lookup failed. Check your internet connection."; }
+  }
+
+  function render(data) {
+    const e = data[0];
+    let h = "<h1>" + esc(e.word) + "</h1>";
+    const phon = e.phonetic || (e.phonetics.find(p => p.text) || {}).text;
+    if (phon) h += '<div class="phon">' + esc(phon) + "</div>";
+    const aud = (e.phonetics.find(p => p.audio) || {}).audio;
+    if (aud) h += '<audio controls src="' + esc(aud) + '"></audio>';
+    data.forEach(entry => entry.meanings.forEach(m => {
+      h += '<div class="pos">' + esc(m.partOfSpeech) + "</div>";
+      m.definitions.slice(0, 3).forEach(d => {
+        h += '<div class="def">' + esc(d.definition) +
+             (d.example ? '<div class="ex">"' + esc(d.example) + '"</div>' : "") + "</div>";
+      });
+    }));
+    out.className = ""; out.innerHTML = h;
+  }
+
+  function handleSelection() {
+    Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, res => {
+      if (res.status !== Office.AsyncResultStatus.Succeeded) return;
+      const w = String(res.value || "").trim().replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "");
+      if (!w || /\s/.test(w) || w.length < 2 || w.length > 30 || /[^A-Za-z'\-]/.test(w)) return;
+      if (w.toLowerCase() === lastWord) return;
+      lastWord = w.toLowerCase();
+      document.getElementById("q").value = w;
+      clearTimeout(timer);
+      timer = setTimeout(() => lookup(w), 300);
+    });
+  }
+
+  document.getElementById("go").onclick = () => {
+    const w = document.getElementById("q").value.trim();
+    if (w) { lastWord = w.toLowerCase(); lookup(w); }
+  };
+  document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("go").click(); });
+
+  Office.onReady(() => {
+    Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, handleSelection);
+  });
+</script>
+</body>
+</html>
