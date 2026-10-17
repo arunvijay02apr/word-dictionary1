@@ -18,6 +18,9 @@
   .box { background:var(--card); border-radius:6px; padding:10px; margin-top:10px; white-space:pre-wrap; line-height:1.5; }
   ins { background:var(--add); text-decoration:none; } del { background:var(--del); }
   .chg { margin:6px 0; } .why { color:var(--muted); font-size:12px; }
+  .verdict { margin-top:10px; padding:8px 10px; border-radius:6px; font-weight:600; }
+  .verdict.ok { background:var(--add); } .verdict.bad { background:var(--del); }
+  .verdict .sub { font-weight:400; font-size:12px; margin-top:2px; }
   #status { color:var(--muted); margin-top:8px; }
 </style>
 </head>
@@ -68,8 +71,8 @@
     return "You are a careful proofreader for professional English documents, including medical and medico-legal reports. " +
       "Fix grammar, spelling, punctuation and obvious typos with minimal edits. " +
       "Never change meaning, medical terms, drug names, doses, numbers, dates, names or measurements. " +
-      "Keep paragraph breaks. " + eng + " Respond ONLY with JSON: " +
-      '{"corrected": "<full corrected text>", "changes": [{"from": "...", "to": "...", "reason": "..."}]}. ' +
+      "Keep paragraph breaks. " + eng + " If the text is a single word, judge whether it is spelled and used correctly. Respond ONLY with JSON: " +
+      '{"is_correct": true or false, "summary": "<one short sentence explaining the verdict>", "corrected": "<full corrected text>", "changes": [{"from": "...", "to": "...", "reason": "..."}]}. ' +
       "If nothing needs fixing, return the original text and an empty changes array.";
   }
 
@@ -135,7 +138,12 @@
       const changes = Array.isArray(res.changes) ? res.changes : [];
       $("status").textContent = (changes.length ? changes.length + " change(s) suggested" : "No corrections needed") +
                                 " · " + Math.round(performance.now() - t0) + " ms";
-      let h = '<div class="box">' + diffHtml(text, corrected) + "</div>";
+      const ok = corrected.trim() === text && changes.length === 0;
+      const sum = res.summary ? '<div class="sub">' + esc(res.summary) + "</div>" : "";
+      let h = ok
+        ? '<div class="verdict ok">✔ Grammatically correct' + sum + "</div>"
+        : '<div class="verdict bad">✘ Not correct · ' + (changes.length || 1) + " issue(s) found" + sum + "</div>";
+      h += '<div class="box">' + diffHtml(text, corrected) + "</div>";
       changes.forEach(c => { h += '<div class="chg">' + esc(c.from) + " → <b>" + esc(c.to) +
                                    '</b><div class="why">' + esc(c.reason || "") + "</div></div>"; });
       if (changes.length) h += '<button id="apply">Replace selection</button><button id="copy" class="sec">Copy corrected</button>' +
