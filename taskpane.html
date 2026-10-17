@@ -35,11 +35,44 @@
 
   async function lookup(word) {
     out.className = "hint"; out.textContent = "Looking up \"" + word + "\"...";
+    const errors = [];
+
+    // Source 1: dictionaryapi.dev
     try {
       const r = await fetch("https://api.dictionaryapi.dev/api/v2/entries/en/" + encodeURIComponent(word));
-      if (!r.ok) { out.textContent = "No definition found for \"" + word + "\"."; return; }
-      render(await r.json());
-    } catch (e) { out.textContent = "Lookup failed. Check your internet connection."; }
+      if (r.ok) { render(await r.json()); return; }
+      errors.push("dictionaryapi.dev: HTTP " + r.status);
+    } catch (e) { errors.push("dictionaryapi.dev: " + e.message); }
+
+    // Source 2 (fallback): Wiktionary
+    try {
+      const r = await fetch("https://en.wiktionary.org/api/rest_v1/page/definition/" +
+                            encodeURIComponent(word.toLowerCase()));
+      if (r.ok) { renderWiktionary(word, await r.json()); return; }
+      errors.push("wiktionary: HTTP " + r.status);
+    } catch (e) { errors.push("wiktionary: " + e.message); }
+
+    out.className = "hint";
+    out.textContent = "No definition found for \"" + word + "\". (" + errors.join(" | ") + ")";
+  }
+
+  function plain(html) {
+    return new DOMParser().parseFromString(html, "text/html").body.textContent.trim();
+  }
+
+  function renderWiktionary(word, data) {
+    let h = "<h1>" + esc(word) + "</h1>";
+    (data.en || []).forEach(m => {
+      h += '<div class="pos">' + esc(m.partOfSpeech) + "</div>";
+      m.definitions.slice(0, 3).forEach(d => {
+        const def = plain(d.definition || "");
+        if (!def) return;
+        const ex = (d.examples || [])[0];
+        h += '<div class="def">' + esc(def) +
+             (ex ? '<div class="ex">"' + esc(plain(ex)) + '"</div>' : "") + "</div>";
+      });
+    });
+    out.className = ""; out.innerHTML = h;
   }
 
   function render(data) {
