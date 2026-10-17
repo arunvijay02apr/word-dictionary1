@@ -18,6 +18,7 @@
   .def { background:var(--card); border-radius:6px; padding:8px 10px; margin-bottom:6px; }
   .ex { color:var(--muted); font-style:italic; margin-top:4px; }
   .hint { color:var(--muted); }
+  .meta { margin-top:14px; font-size:11px; color:var(--muted); }
   audio { margin-top:6px; width:100%; height:32px; }
 </style>
 </head>
@@ -98,21 +99,50 @@
     return h;
   }
 
-  // ---- lookup: cache first, then race both sources ----
+  // ---- source 3: Datamuse (fast, simple) ----
+  async function fromDatamuse(word) {
+    const r = await timedFetch("https://api.datamuse.com/words?sp=" + encodeURIComponent(word) + "&md=d&max=1", 5000);
+    if (!r.ok) throw new Error("datamuse: HTTP " + r.status);
+    const data = await r.json();
+    if (!data.length || !data[0].defs || data[0].word.toLowerCase() !== word) throw new Error("datamuse: none");
+    const names = { n: "noun", v: "verb", adj: "adjective", adv: "adverb", u: "other" };
+    let h = "<h1>" + esc(data[0].word) + "</h1>", last = "";
+    data[0].defs.slice(0, 6).forEach(d => {
+      const parts = d.split("\t"), p = names[parts[0]] || parts[0];
+      if (p !== last) { h += '<div class="pos">' + esc(p) + "</div>"; last = p; }
+      h += '<div class="def">' + esc(parts.slice(1).join(" ")) + "</div>";
+    });
+    return h;
+  }
+
+  // ---- lookup: cache first, then race all sources ----
+  const VERSION = "v4";
+  const meta = (txt) => '<div class="meta">' + VERSION + " · " + esc(txt) + "</div>";
+
   async function lookup(word) {
     const key = word.toLowerCase();
     const my = ++currentReq;
-    if (cache.has(key)) { out.className = ""; out.innerHTML = cache.get(key); return; }
+    const t0 = performance.now();
+    if (cache.has(key)) { out.className = ""; out.innerHTML = cache.get(key) + meta("cache · 0 ms"); return; }
     out.className = "hint"; out.textContent = "Looking up \"" + word + "\"...";
+    const tag = (name, p) => p.then(html => ({ html, name }));
     try {
-      const html = await Promise.any([fromDictApi(key), fromWiktionary(key)]);
-      cache.set(key, html); saveCache();
-      if (my === currentReq) { out.className = ""; out.innerHTML = html; }
+      const r = await Promise.any([
+        tag("dictionaryapi.dev", fromDictApi(key)),
+        tag("Wiktionary", fromWiktionary(key)),
+        tag("Datamuse", fromDatamuse(key))
+      ]);
+      cache.set(key, r.html); saveCache();
+      if (my === currentReq) {
+        out.className = "";
+        out.innerHTML = r.html + meta("via " + r.name + " · " + Math.round(performance.now() - t0) + " ms");
+      }
     } catch (e) {
       if (my !== currentReq) return;
       const why = e.errors ? " (" + e.errors.map(x => x.message).join(" | ") + ")" : "";
       out.className = "hint";
-      out.textContent = "No definition found for \"" + word + "\"." + why;
+      out.innerHTML = esc("No definition found for \"" + word + "\"." + why) +
+                      meta("gave up after " + Math.round(performance.now() - t0) + " ms");
     }
   }
 
