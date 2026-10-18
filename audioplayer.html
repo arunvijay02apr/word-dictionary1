@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcription Player</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#1f2937; --muted:#6b7280; --accent:#ea580c; --card:#f3f4f6; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1f1f1f; --fg:#e5e7eb; --muted:#9ca3af; --accent:#fb923c; --card:#2b2b2b; } }
+  body { font-family:"Segoe UI",Arial,sans-serif; margin:0; padding:12px; background:var(--bg); color:var(--fg); font-size:14px; }
+  button { padding:8px 12px; border:0; border-radius:4px; background:var(--accent); color:#fff; cursor:pointer; font-size:14px; }
+  button.sec { background:var(--muted); }
+  .row { display:flex; gap:6px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  .row.big button { flex:1; font-size:18px; }
+  input[type=range] { width:100%; }
+  input[type=number],select { width:64px; padding:4px; border:1px solid var(--muted); border-radius:4px; background:var(--bg); color:var(--fg); }
+  .card { background:var(--card); border-radius:6px; padding:8px 10px; margin-top:12px; }
+  .muted { color:var(--muted); font-size:12px; } #raw { font-family:Consolas,monospace; font-size:12px; word-break:break-all; }
+  #name { margin-top:8px; font-weight:600; word-break:break-all; }
+</style>
+</head>
+<body>
+<button id="import">Import audio</button>
+<input id="file" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.aac,.flac" hidden>
+<div id="name" class="muted">No file loaded</div>
+<audio id="a"></audio>
+
+<input id="seek" type="range" min="0" max="1000" value="0" style="margin-top:10px">
+<div class="row" style="justify-content:space-between"><span id="cur">0:00</span><span id="dur">0:00</span></div>
+<div class="row big"><button id="rew">⏪</button><button id="play">▶</button><button id="fwd">⏩</button></div>
+<div class="row muted">
+  Step <input id="step" type="number" min="1" max="60" value="5"> s
+  Auto-rewind <input id="auto" type="number" min="0" max="10" value="2"> s
+  Speed <select id="speed"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select>
+</div>
+
+<div class="card">
+  <b>Foot pedal</b>
+  <div class="muted">Keys (pane focused): [ rewind, Space play/pause, ] forward. Pedals mapped to media keys also work.</div>
+  <div class="row"><button id="connect" class="sec">Connect pedal (USB)</button></div>
+  <div class="row muted">Learn:
+    <button class="sec" data-learn="rew">Rewind</button>
+    <button class="sec" data-learn="play">Play/Pause</button>
+    <button class="sec" data-learn="fwd">Forward</button>
+  </div>
+  <div class="muted" style="margin-top:6px">Click Learn, then press that pedal.</div>
+  <div id="raw" class="muted">No pedal data yet</div>
+  <div id="pstatus" class="muted"></div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id), a = $("a");
+  const fmt = t => isFinite(t) ? Math.floor(t/60) + ":" + String(Math.floor(t%60)).padStart(2,"0") : "0:00";
+  let cfg = { step:5, auto:2, speed:"1", map:{} };
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem("pcfg") || "{}")); } catch (e) {}
+  const save = () => { try { localStorage.setItem("pcfg", JSON.stringify(cfg)); } catch (e) {} };
+  $("step").value = cfg.step; $("auto").value = cfg.auto; $("speed").value = cfg.speed; a.playbackRate = +cfg.speed;
+  $("step").onchange = () => { cfg.step = +$("step").value || 5; save(); };
+  $("auto").onchange = () => { cfg.auto = +$("auto").value || 0; save(); };
+  $("speed").onchange = () => { cfg.speed = $("speed").value; a.playbackRate = +cfg.speed; save(); };
+
+  $("import").onclick = () => $("file").click();
+  $("file").onchange = e => {
+    const f = e.target.files[0]; if (!f) return;
+    a.src = URL.createObjectURL(f); a.playbackRate = +cfg.speed;
+    $("name").textContent = f.name; $("name").className = "";
+    if ("mediaSession" in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: f.name });
+  };
+  a.onerror = () => { $("name").className = "muted"; $("name").textContent = "This format can't play here (DS2/DSS/WMA not supported). Convert to MP3 or WAV."; };
+  a.onloadedmetadata = () => { $("dur").textContent = fmt(a.duration); };
+  a.ontimeupdate = () => { if (!dragging) $("seek").value = a.duration ? a.currentTime / a.duration * 1000 : 0; $("cur").textContent = fmt(a.currentTime); };
+  a.onplay = () => $("play").textContent = "⏸"; a.onpause = () => $("play").textContent = "▶";
+  let dragging = false;
+  $("seek").oninput = () => { dragging = true; if (a.duration) a.currentTime = $("seek").value / 1000 * a.duration; };
+  $("seek").onchange = () => dragging = false;
+
+  function toggle() {
+    if (!a.src) return;
+    if (a.paused) { a.currentTime = Math.max(0, a.currentTime - cfg.auto); a.play(); } else a.pause();
+  }
+  function step(dir) { if (a.src) a.currentTime = Math.min(a.duration || 1e9, Math.max(0, a.currentTime + dir * cfg.step)); }
+  $("play").onclick = toggle; $("rew").onclick = () => step(-1); $("fwd").onclick = () => step(1);
+
+  // hold-to-repeat for pedal rewind/forward
+  let hold = null;
+  function press(act) {
+    if (act === "play") return toggle();
+    const dir = act === "rew" ? -1 : 1; step(dir); clearInterval(hold); hold = setInterval(() => step(dir), 300);
+  }
+  const release = () => clearInterval(hold);
+
+  // keyboard (works when the pane has focus)
+  document.addEventListener("keydown", e => {
+    if (/INPUT|SELECT/.test(e.target.tagName) && e.target.type !== "range") return;
+    if (e.key === "[") step(-1); else if (e.key === "]") step(1);
+    else if (e.code === "Space") { e.preventDefault(); toggle(); }
+  });
+  // media keys / pedals mapped to media keys
+  if ("mediaSession" in navigator) {
+    const ms = navigator.mediaSession;
+    [["play", () => { if (a.paused) toggle(); }], ["pause", () => a.pause()],
+     ["seekbackward", () => step(-1)], ["seekforward", () => step(1)],
+     ["previoustrack", () => step(-1)], ["nexttrack", () => step(1)]]
+      .forEach(([n, f]) => { try { ms.setActionHandler(n, f); } catch (e) {} });
+  }
+
+  // USB pedal via WebHID with learn mode
+  let prev = null, learning = null;
+  const ps = t => $("pstatus").textContent = t;
+  $("connect").onclick = async () => {
+    if (!navigator.hid) { ps("USB pedal access (WebHID) isn't available in this Word pane. Use media keys or the keys above."); return; }
+    try {
+      const devs = await navigator.hid.requestDevice({ filters: [] });
+      if (!devs.length) return;
+      const d = devs[0]; if (!d.opened) await d.open();
+      d.addEventListener("inputreport", onReport);
+      ps("Connected: " + (d.productName || "HID device"));
+    } catch (e) { ps("Pedal error: " + e.message); }
+  };
+  document.querySelectorAll("[data-learn]").forEach(b => b.onclick = () => { learning = b.dataset.learn; ps("Press the pedal for: " + b.textContent); });
+
+  function onReport(ev) {
+    const d = new Uint8Array(ev.data.buffer, ev.data.byteOffset, ev.data.byteLength);
+    $("raw").textContent = "Report " + ev.reportId + ": " + Array.from(d).map(x => x.toString(16).padStart(2, "0")).join(" ");
+    if (!prev || prev.length !== d.length) prev = new Uint8Array(d.length);
+    if (learning) {
+      for (let i = 0; i < d.length; i++) {
+        const m = d[i] & ~prev[i];
+        if (m) { cfg.map[learning] = { id: ev.reportId, i, mask: m }; save(); ps("Learned: " + learning); learning = null; break; }
+      }
+    } else {
+      for (const act in cfg.map) {
+        const m = cfg.map[act]; if (m.id !== ev.reportId) continue;
+        const now = (d[m.i] & m.mask) !== 0, was = (prev[m.i] & m.mask) !== 0;
+        if (now && !was) press(act); else if (!now && was) release();
+      }
+    }
+    prev = d.slice();
+  }
+  if (typeof Office !== "undefined" && Office.onReady) Office.onReady();
+</script>
+</body>
+</html>
