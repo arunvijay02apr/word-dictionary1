@@ -38,6 +38,7 @@
   <label><input type="checkbox" id="track"> Apply corrections as tracked changes</label>
 </details>
 
+<label><input type="checkbox" id="auto"> Check automatically when I select text</label>
 <button id="check">Check selected text</button>
 <div id="status">Select a paragraph in your document, then click the button.</div>
 <div id="result"></div>
@@ -48,7 +49,9 @@
   const DEFAULT_MODEL = { groq:"openai/gpt-oss-120b", gemini:"gemini-2.0-flash", ollama:"llama3.1" };
   let cfg = { provider:"groq", key:"", model:"", english:"keep", track:true };
   try { Object.assign(cfg, JSON.parse(localStorage.getItem("gcfg") || "{}")); } catch (e) {}
-  let corrected = "";
+  let corrected = "", checkedText = "", req = 0, autoTimer = null, lastAuto = "";
+  try { $("auto").checked = localStorage.getItem("gauto") === "1"; } catch (e) {}
+  $("auto").addEventListener("change", () => { try { localStorage.setItem("gauto", $("auto").checked ? "1" : "0"); } catch (e) {} lastAuto = ""; });
 
   function applyCfgToUI() {
     $("provider").value = cfg.provider; $("key").value = cfg.key;
@@ -125,15 +128,17 @@
     return Word.run(async ctx => { const s = ctx.document.getSelection(); s.load("text"); await ctx.sync(); return s.text; });
   }
 
-  $("check").onclick = async () => {
-    saveCfg(); $("result").innerHTML = ""; corrected = "";
+  async function doCheck(auto) {
+    saveCfg(); const my = ++req; $("result").innerHTML = ""; corrected = "";
     if (cfg.provider !== "ollama" && !cfg.key) { $("status").textContent = "Add your API key in Settings first."; $("settings").open = true; return; }
     try {
       const text = (await getSelectionText()).trim();
-      if (!text) { $("status").textContent = "Nothing selected. Select a paragraph first."; return; }
+      if (!text) { if (!auto) $("status").textContent = "Nothing selected. Select a paragraph first."; return; }
+      checkedText = text;
       if (text.length > 8000) { $("status").textContent = "Selection is too long (over 8000 characters). Select a smaller part."; return; }
       $("status").textContent = "Checking..."; const t0 = performance.now();
       const res = await callAI(text);
+      if (my !== req) return;
       corrected = String(res.corrected || text);
       const changes = Array.isArray(res.changes) ? res.changes : [];
       $("status").textContent = (changes.length ? changes.length + " change(s) suggested" : "No corrections needed") +
@@ -154,17 +159,37 @@
           try {
             await Word.run(async ctx => {
               if (cfg.track) { try { ctx.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll; await ctx.sync(); } catch (e) {} }
-              ctx.document.getSelection().insertText(corrected, "Replace"); await ctx.sync();
+              const sel = ctx.document.getSelection(); sel.load("text"); await ctx.sync();
+              const m = sel.text.match(/^(\s*)([\s\S]*?)(\s*)$/);
+              if (m[2] !== checkedText) { $("status").textContent = "Selection changed. Select the text again and re-check."; return; }
+              sel.insertText(m[1] + corrected.trim() + m[3], "Replace"); await ctx.sync();
+              lastAuto = corrected.trim();
             });
-            $("status").textContent = "Replaced.";
+            $("status").textContent = $("status").textContent.startsWith("Selection changed") ? $("status").textContent : "Replaced.";
           } catch (e) { $("status").textContent = "Could not replace: " + e.message; }
         };
         $("copy").onclick = async () => { try { await navigator.clipboard.writeText(corrected); $("status").textContent = "Copied."; } catch (e) { $("status").textContent = "Copy failed."; } };
       }
-    } catch (e) { $("status").textContent = "Error: " + e.message; }
-  };
+    } catch (e) { if (my === req) $("status").textContent = "Error: " + e.message; }
+  }
+  $("check").onclick = () => doCheck(false);
 
-  if (typeof Office !== "undefined" && Office.onReady) Office.onReady();
+  // auto-check when the selection changes
+  function onSelection() {
+    if (!$("auto").checked) return;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(async () => {
+      try {
+        const t = (await getSelectionText()).trim();
+        if (!t || t.length < 2 || t === lastAuto || t === corrected.trim()) return;
+        lastAuto = t; doCheck(true);
+      } catch (e) {}
+    }, 800);
+  }
+
+  if (typeof Office !== "undefined" && Office.onReady) Office.onReady(i => {
+    if (i && i.host) Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onSelection);
+  });
 </script>
 </body>
 </html>
