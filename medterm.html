@@ -45,7 +45,7 @@
 <script>
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  const DEFAULT_MODEL = { groq:"openai/gpt-oss-120b", gemini:"gemini-2.0-flash", ollama:"llama3.1" };
+  const DEFAULT_MODEL = { groq:"openai/gpt-oss-120b", gemini:"gemini-3.8-flash", ollama:"llama3.1" };
   let cfg = { provider:"groq", key:"", model:"", english:"keep", track:true };
   try { Object.assign(cfg, JSON.parse(localStorage.getItem("gcfg") || "{}")); } catch (e) {}   // shares settings with the Grammar add-in
   try { $("auto").checked = localStorage.getItem("mauto") !== "0"; } catch (e) {}
