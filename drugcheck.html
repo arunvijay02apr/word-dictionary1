@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drug Check</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#1f2937; --muted:#6b7280; --accent:#7c3aed; --card:#f3f4f6; --ok:#bbf7d0; --bad:#fecaca; --warn:#fef08a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1f1f1f; --fg:#e5e7eb; --muted:#9ca3af; --accent:#a78bfa; --card:#2b2b2b; --ok:#14532d; --bad:#7f1d1d; --warn:#713f12; } }
+  body { font-family:"Segoe UI",Arial,sans-serif; margin:0; padding:12px; background:var(--bg); color:var(--fg); font-size:14px; }
+  label { display:block; margin-top:8px; color:var(--muted); font-size:12px; }
+  input,select { width:100%; box-sizing:border-box; padding:6px; border:1px solid var(--muted); border-radius:4px; background:var(--bg); color:var(--fg); }
+  input[type=checkbox] { width:auto; }
+  button { padding:6px 10px; border:0; border-radius:4px; background:var(--accent); color:#fff; cursor:pointer; }
+  details { background:var(--card); border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+  .row { display:flex; gap:6px; margin-top:8px; } .row input { flex:1; }
+  .verdict { margin-top:12px; padding:10px; border-radius:6px; font-weight:600; font-size:15px; }
+  .ok { background:var(--ok); } .bad { background:var(--bad); } .warn { background:var(--warn); }
+  .sub { font-weight:400; font-size:13px; margin-top:4px; }
+  .meta { color:var(--muted); font-size:12px; margin-top:6px; }
+  h3 { font-size:13px; margin:14px 0 4px; color:var(--accent); text-transform:uppercase; letter-spacing:.04em; }
+  .item { background:var(--card); border-radius:6px; padding:7px 10px; margin-top:5px; }
+  .item .note { color:var(--muted); font-size:12px; }
+  .sug { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .caution { margin-top:14px; padding:8px 10px; border-left:3px solid var(--accent); background:var(--card); font-size:12px; color:var(--muted); }
+  #status { color:var(--muted); margin-top:8px; font-size:12px; }
+</style>
+</head>
+<body>
+<details id="settings">
+  <summary>Settings</summary>
+  <label>AI provider</label>
+  <select id="provider"><option value="groq">Groq (free tier)</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama (local, on this PC)</option></select>
+  <label>API key (stored only in Word on this PC)</label>
+  <input id="key" type="password" placeholder="Paste your API key">
+  <label>Model</label><input id="model">
+  <label><input type="checkbox" id="track"> Replace as tracked change</label>
+</details>
+
+<label style="margin-top:0">Region (spelling and names)</label>
+<select id="region"><option value="us">United States</option><option value="uk">United Kingdom</option><option value="au">Australia</option></select>
+<label><input type="checkbox" id="auto" checked> Check automatically when I select a drug</label>
+<div class="row"><input id="q" placeholder="Or type a drug, e.g. amoxicillin"><button id="go">Check</button></div>
+<div id="status">Select a drug name in your document.</div>
+<div id="result"></div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Drug Check v1</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const DEFAULT_MODEL = { groq:"openai/gpt-oss-120b", gemini:"gemini-3.8-flash", ollama:"llama3.1" };
+  const REGION = {
+    us:{ name:"United States", desc:"United States (FDA/USAN names such as acetaminophen, albuterol; US brand names)", ref:"the FDA label or a drug database such as Micromedex or Lexicomp" },
+    uk:{ name:"United Kingdom", desc:"United Kingdom (BNF/rINN names such as paracetamol, salbutamol; UK brand names)", ref:"the BNF" },
+    au:{ name:"Australia", desc:"Australia (TGA/AMH approved names such as paracetamol, salbutamol; Australian brand names)", ref:"the Australian Medicines Handbook (AMH) or the TGA Product Information" }
+  };
+  let cfg = { provider:"groq", key:"", model:"", track:true }, region = "us";
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem("gcfg") || "{}")); } catch (e) {}   // shared with the other add-ins
+  try { region = localStorage.getItem("drugregion") || "us"; $("auto").checked = localStorage.getItem("dauto") !== "0"; } catch (e) {}
+
+  $("provider").value = cfg.provider; $("key").value = cfg.key; $("model").value = cfg.model || DEFAULT_MODEL[cfg.provider];
+  $("track").checked = cfg.track; $("region").value = region;
+  function saveCfg() {
+    const keep = (() => { try { return JSON.parse(localStorage.getItem("gcfg") || "{}"); } catch (e) { return {}; } })();
+    cfg = Object.assign(keep, { provider:$("provider").value, key:$("key").value.trim(), model:$("model").value.trim(), track:$("track").checked });
+    region = $("region").value;
+    try { localStorage.setItem("gcfg", JSON.stringify(cfg)); localStorage.setItem("drugregion", region); localStorage.setItem("dauto", $("auto").checked ? "1" : "0"); } catch (e) {}
+  }
+  ["key","model","track","auto","region"].forEach(id => $(id).addEventListener("change", saveCfg));
+  $("provider").addEventListener("change", () => { $("model").value = DEFAULT_MODEL[$("provider").value]; saveCfg(); });
+  if (!cfg.key && cfg.provider !== "ollama") $("settings").open = true;
+
+  function sys() {
+    return "You are a drug-name reference assistant for a medical transcriptionist. The user sends selected text: usually one drug name (generic or brand), sometimes with a strength or frequency. " +
+      "Region: " + REGION[region].desc + ". Check the spelling of the drug name, say whether it is a generic or brand name, and use the region's preferred name and spelling. " +
+      "Give typical adult doses for reference only (route and frequency included, concise), main indications, and look-alike/sound-alike drugs with what each is used for. " +
+      "Never invent a drug or a dose; if you are not sure, set confidence to low. If the text is not a drug, say so. Limits: 4 indications, 4 doses, 5 sound-alikes, 5 suggestions (suggestions only when the spelling is wrong or the name is not valid). " +
+      "Respond ONLY with JSON: " +
+      '{"drug_text":"exact drug-name part of the input","is_correct":true or false,"confidence":"high|medium|low","name_type":"generic|brand|combination|not a drug|unknown",' +
+      '"preferred_name":"the name as written in the selected region","matches_region":true or false,"generic_name":"","brand_names":[""],"drug_class":"","region_note":"short note on regional naming differences or empty",' +
+      '"indications":[{"condition":"","note":""}],"doses":[{"indication":"","dose":"","note":""}],"dose_check":"comment on any strength or dose written in the input, or empty",' +
+      '"sound_alikes":[{"name":"","note":""}],"suggestions":[{"text":"","note":""}]}';
+  }
+
+  async function callAI(text) {
+    const model = cfg.model || DEFAULT_MODEL[cfg.provider]; let r, raw;
+    if (cfg.provider === "groq") {
+      const body = { model, temperature:0, response_format:{ type:"json_object" }, messages:[{ role:"system", content:sys() }, { role:"user", content:text }] };
+      if (/^openai\/gpt-oss/.test(model)) body.reasoning_effort = "low";
+      r = await fetch("https://api.groq.com/openai/v1/chat/completions", { method:"POST",
+        headers:{ "Content-Type":"application/json", "Authorization":"Bearer " + cfg.key }, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error("Groq " + r.status + ": " + (await r.text()).slice(0, 200));
+      raw = (await r.json()).choices[0].message.content;
+    } else if (cfg.provider === "gemini") {
+      r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(cfg.key),
+        { method:"POST", headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ systemInstruction:{ parts:[{ text:sys() }] }, contents:[{ role:"user", parts:[{ text }] }],
+            generationConfig:{ temperature:0, responseMimeType:"application/json" } }) });
+      if (!r.ok) throw new Error("Gemini " + r.status + ": " + (await r.text()).slice(0, 200));
+      raw = (await r.json()).candidates[0].content.parts[0].text;
+    } else {
+      r = await fetch("http://localhost:11434/api/chat", { method:"POST",
+        body: JSON.stringify({ model, stream:false, format:"json", options:{ temperature:0 }, messages:[{ role:"system", content:sys() }, { role:"user", content:text }] }) });
+      if (!r.ok) throw new Error("Ollama " + r.status + ": " + (await r.text()).slice(0, 200));
+      raw = (await r.json()).message.content;
+    }
+    return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim());
+  }
+
+  const clean = s => String(s || "").replace(/\s+/g, " ").trim().replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9)%]+$/g, "");
+  const memo = new Map(); let last = "", timer = null, req = 0, checked = "", drugText = "";
+
+  async function check(term) {
+    saveCfg();
+    if (cfg.provider !== "ollama" && !cfg.key) { $("status").textContent = "Add your API key in Settings first."; $("settings").open = true; return; }
+    const my = ++req, key = term.toLowerCase() + "|" + region; checked = term;
+    $("status").textContent = "Checking \"" + term + "\"..."; $("result").innerHTML = "";
+    try {
+      const t0 = performance.now();
+      const res = memo.get(key) || await callAI(term); memo.set(key, res);
+      if (my !== req) return;
+      render(term, res); $("status").textContent = Math.round(performance.now() - t0) + " ms · " + REGION[region].name;
+    } catch (e) { if (my === req) $("status").textContent = "Error: " + e.message; }
+  }
+
+  const arr = x => Array.isArray(x) ? x.filter(Boolean) : [];
+  const sec = (title, items) => items.length ? "<h3>" + title + "</h3>" + items.join("") : "";
+
+  function render(term, r) {
+    drugText = String(r.drug_text || term);
+    const reg = REGION[region], pref = String(r.preferred_name || ""), low = r.confidence === "low";
+    const differs = pref && pref.toLowerCase() !== drugText.toLowerCase();
+    let cls, head;
+    if (r.is_correct === false) { cls = "bad"; head = "✘ Not correct"; }
+    else if (low) { cls = "warn"; head = "⚠ Not sure — please verify"; }
+    else if (r.matches_region === false && differs) { cls = "warn"; head = "✔ Valid, but " + reg.name + " writes it as " + pref; }
+    else { cls = "ok"; head = "✔ Correct spelling"; }
+
+    let h = '<div class="verdict ' + cls + '">' + esc(head) + ": " + esc(drugText) +
+            (r.dose_check ? '<div class="sub">Dose: ' + esc(r.dose_check) + "</div>" : "") + "</div>" +
+            '<div class="meta">' + esc(r.name_type || "") + (r.drug_class ? " · " + esc(r.drug_class) : "") + " · confidence: " + esc(r.confidence || "?") + "</div>";
+    if (r.region_note) h += '<div class="meta">' + esc(r.region_note) + "</div>";
+
+    const names = [];
+    if (r.generic_name) names.push('<div class="item"><b>Generic:</b> ' + esc(r.generic_name) + "</div>");
+    if (arr(r.brand_names).length) names.push('<div class="item"><b>Brands:</b> ' + arr(r.brand_names).map(esc).join(", ") + "</div>");
+    h += sec("Names", names);
+    h += sec("Used for", arr(r.indications).map(i => '<div class="item"><b>' + esc(i.condition) + '</b><div class="note">' + esc(i.note) + "</div></div>"));
+    h += sec("Typical adult dosing", arr(r.doses).map(d => '<div class="item"><b>' + esc(d.indication) + "</b>: " + esc(d.dose) + '<div class="note">' + esc(d.note) + "</div></div>"));
+    h += sec("Sound-alike / look-alike", arr(r.sound_alikes).map(s => '<div class="item"><b>' + esc(s.name) + '</b><div class="note">' + esc(s.note) + "</div></div>"));
+
+    const sug = arr(r.suggestions).slice(0, 5);
+    if ((r.is_correct === false || (r.matches_region === false && differs)) && differs &&
+        !sug.some(s => String(s.text).toLowerCase() === pref.toLowerCase())) sug.unshift({ text:pref, note:"Preferred in " + reg.name });
+    if (r.is_correct === false || (r.matches_region === false && differs))
+      h += sec("Use instead", sug.map((s, i) => '<div class="item sug"><div><b>' + esc(s.text) + '</b><div class="note">' + esc(s.note) + '</div></div><button data-i="' + i + '">Use</button></div>'));
+
+    h += '<div class="caution">Reference only. AI can make mistakes with doses and rare drugs. Always confirm against ' + esc(reg.ref) + " before relying on this.</div>";
+    $("result").innerHTML = h;
+    $("result").querySelectorAll("button[data-i]").forEach(b => b.onclick = () => replaceWith(sug[+b.dataset.i].text));
+  }
+
+  async function replaceWith(text) {
+    try {
+      await Word.run(async ctx => {
+        const sel = ctx.document.getSelection(); sel.load("text"); await ctx.sync();
+        const raw = sel.text, i = raw.toLowerCase().indexOf(drugText.toLowerCase());
+        if (clean(raw).toLowerCase() !== checked.toLowerCase() || i < 0) { $("status").textContent = "Selection changed. Select the drug again, then click Use."; return; }
+        if (cfg.track) { try { ctx.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll; await ctx.sync(); } catch (e) {} }
+        sel.insertText(raw.slice(0, i) + text + raw.slice(i + drugText.length), "Replace"); await ctx.sync();
+        last = clean(raw.slice(0, i) + text + raw.slice(i + drugText.length)).toLowerCase();
+        $("status").textContent = "Replaced with \"" + text + "\".";
+      });
+    } catch (e) { $("status").textContent = "Could not replace: " + e.message; }
+  }
+
+  function onSelection() {
+    if (!$("auto").checked) return;
+    Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, r => {
+      if (r.status !== "succeeded") return;
+      const t = clean(r.value);
+      if (!t || t.length > 80 || t.split(" ").length > 6 || t.toLowerCase() === last) return;
+      last = t.toLowerCase(); $("q").value = t;
+      clearTimeout(timer); timer = setTimeout(() => check(t), 500);
+    });
+  }
+  $("go").onclick = () => { const t = clean($("q").value); if (t) { last = t.toLowerCase(); check(t); } };
+  $("q").addEventListener("keydown", e => { if (e.key === "Enter") $("go").click(); });
+  $("region").addEventListener("change", () => { last = ""; if (checked) check(checked); });
+
+  if (typeof Office !== "undefined" && Office.onReady) Office.onReady(i => {
+    if (i && i.host) Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onSelection);
+  });
+</script>
+</body>
+</html>
