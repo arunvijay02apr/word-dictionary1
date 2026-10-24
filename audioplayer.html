@@ -50,6 +50,10 @@
   <div class="row muted">Noise reduction
     <select id="nr" style="width:auto"><option value="off">Off</option><option value="light">Light</option><option value="medium">Medium</option><option value="strong">Strong</option></select></div>
   <div class="row muted"><label><input type="checkbox" id="lvl"> Speech leveler (lifts quiet speech, evens out loud parts)</label></div>
+  <div class="row"><button id="skipBtn" class="sec">Remove silence: Off</button><button id="resetFx" class="sec">Reset to original</button></div>
+  <div class="row muted">Gaps longer than <select id="sgap" style="width:auto"><option value="0.5">0.5 s</option><option value="1">1 s</option><option value="2">2 s</option></select>
+    Sensitivity <select id="ssens" style="width:auto"><option value="gentle">Gentle</option><option value="normal">Normal</option><option value="aggressive">Aggressive</option></select></div>
+  <div id="silinfo" class="muted" style="margin-top:4px"></div>
   <div class="row muted"><label><input type="checkbox" id="autoFx"> Auto-enhance when a file is loaded</label></div>
   <div id="autoinfo" class="muted" style="margin-top:4px"></div>
   <div class="muted" style="margin-top:6px">Filters hum and hiss and lowers background between words. It can't remove noise that overlaps speech. High boost may distort.</div>
@@ -90,9 +94,15 @@
   <div class="muted" style="margin-top:6px">Click Learn, then press that pedal.</div>
   <div id="raw" class="muted">No pedal data yet</div>
   <div id="pstatus" class="muted"></div>
+  <div id="mapinfo" class="muted" style="margin-top:4px"></div>
+  <div class="row"><button id="clearMap" class="sec">Clear pedal setup</button></div>
+  <details style="margin-top:8px"><summary class="muted">Backup / restore pedal setup</summary>
+    <textarea id="pbackup" rows="3" style="width:100%;box-sizing:border-box;margin-top:6px;font-family:Consolas,monospace;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--muted);border-radius:4px"></textarea>
+    <div class="row"><button id="showMap" class="sec">Show setup</button><button id="loadMap" class="sec">Load setup</button></div>
+  </details>
 </div>
 
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v5</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v7</div>
 
 <script>
   const $ = id => document.getElementById(id), a = $("a");
@@ -168,9 +178,7 @@
     try {
       const devs = await navigator.hid.requestDevice({ filters: [] });
       if (!devs.length) return;
-      const d = devs[0]; if (!d.opened) await d.open();
-      d.addEventListener("inputreport", onReport);
-      ps("Connected: " + (d.productName || "HID device"));
+      await openPedal(devs[0]);
     } catch (e) { ps("Pedal error: " + e.message); }
   };
   document.querySelectorAll("[data-learn]").forEach(b => b.onclick = () => { learning = b.dataset.learn; ps("Press the pedal for: " + b.textContent); });
@@ -182,7 +190,7 @@
     if (learning) {
       for (let i = 0; i < d.length; i++) {
         const m = d[i] & ~prev[i];
-        if (m) { cfg.map[learning] = { id: ev.reportId, i, mask: m }; save(); ps("Learned: " + learning); learning = null; break; }
+        if (m) { cfg.map[learning] = { id: ev.reportId, i, mask: m }; save(); ps("Learned: " + learning); learning = null; updMapInfo(); break; }
       }
     } else {
       for (const act in cfg.map) {
@@ -322,7 +330,7 @@
   var peaks = null, wavemsg = "Import audio to see its waveform", waveTok = 0, raf = 0;
 
   async function buildWave(f) {
-    const tok = ++waveTok; peaks = null; wavemsg = "Loading waveform..."; drawWave();
+    const tok = ++waveTok; peaks = null; wrms = null; silences = []; updSilInfo(); wavemsg = "Loading waveform..."; drawWave();
     if (f.size > 80 * 1024 * 1024) { wavemsg = "File too large to draw a waveform"; lastStats = null; if (cfg.autoFx !== false) autoEnhance(null); drawWave(); return; }
     try {
       const buf = await f.arrayBuffer();
@@ -341,6 +349,12 @@
       const sr = Array.from(rms).sort((x, y) => x - y), nf = Math.max(sr[Math.floor(N * 0.1)], 1e-5), sp = Math.max(sr[Math.floor(N * 0.9)], 1e-5);
       lastStats = { snr: 20 * Math.log10(sp / nf), sp };
       if (cfg.autoFx !== false) autoEnhance(lastStats);
+      const win = Math.max(1, Math.round(d.sampleRate * 0.05)), nw = Math.floor(c0.length / win), wr = new Float32Array(nw);
+      for (let i = 0; i < nw; i++) {
+        let ss = 0; for (let j = i * win; j < (i + 1) * win; j++) { let v = Math.abs(c0[j]); if (c1) v = Math.max(v, Math.abs(c1[j])); ss += v * v; }
+        wr[i] = Math.sqrt(ss / win);
+      }
+      wrms = wr; winDur = win / d.sampleRate; computeSilences();
     } catch (e) { if (tok === waveTok) { wavemsg = "Waveform not available for this file"; lastStats = null; if (cfg.autoFx !== false) autoEnhance(null); } }
     if (tok === waveTok) drawWave();
   }
@@ -355,6 +369,7 @@
     const dur = a.duration || 0, ct = a.currentTime || 0;
     if (!peaks) { x.fillStyle = mut; x.font = "12px Segoe UI, Arial"; x.textAlign = "center"; x.fillText(wavemsg, w / 2, h / 2 + 4); return; }
     if (dur && A != null && B != null && B > A) { x.fillStyle = acc + "33"; x.fillRect(A / dur * w, 0, (B - A) / dur * w, h); }
+    if (dur && cfg.skip && silences.length) { x.fillStyle = "rgba(220,38,38,0.22)"; silences.forEach(r => x.fillRect(r[0] / dur * w, 0, Math.max(1, (r[1] - r[0]) / dur * w), h)); }
     const played = dur ? ct / dur * w : 0;
     for (let px = 0; px < w; px++) {
       const v = peaks[Math.min(peaks.length - 1, Math.floor(px / w * peaks.length))], bh = Math.max(1, v * h * 0.9);
@@ -399,6 +414,97 @@
   $("autoFx").onchange = () => { cfg.autoFx = $("autoFx").checked; save(); if (cfg.autoFx && a.src) autoEnhance(lastStats); else if (!cfg.autoFx) $("autoinfo").textContent = ""; };
   $("hold").checked = cfg.hold !== false;
   $("hold").onchange = () => { cfg.hold = $("hold").checked; save(); };
+
+
+  // ---------- v6: silence removal (skip) + reset to original ----------
+  var wrms = null, winDur = 0.05, silences = [];
+
+  function updSilInfo() {
+    if (!$("silinfo")) return;
+    if (!wrms) { $("silinfo").textContent = ""; return; }
+    const tot = silences.reduce((t, r) => t + (r[1] - r[0]), 0);
+    $("silinfo").textContent = silences.length + " silent gap(s) found · about " + fmtS(tot) + " can be skipped" + (cfg.skip ? " (shaded red on the waveform)" : "");
+  }
+  function updSkipBtn() { $("skipBtn").textContent = "Remove silence: " + (cfg.skip ? "On" : "Off"); $("skipBtn").className = cfg.skip ? "" : "sec"; }
+
+  function computeSilences() {
+    silences = [];
+    if (!wrms || !wrms.length) { updSilInfo(); return; }
+    const sorted = Array.from(wrms).sort((x, y) => x - y), nfw = sorted[Math.floor(sorted.length * 0.1)], spw = sorted[Math.floor(sorted.length * 0.9)];
+    const mult = { gentle: 0.03, normal: 0.06, aggressive: 0.12 }[cfg.ssens || "normal"];
+    const thr = Math.min(Math.max(nfw * 1.8, spw * mult), spw * 0.3), minGap = +(cfg.sgap || 1), pad = 0.2;
+    let start = -1;
+    for (let i = 0; i <= wrms.length; i++) {
+      const quiet = i < wrms.length && wrms[i] < thr;
+      if (quiet && start < 0) start = i;
+      if (!quiet && start >= 0) {
+        const s0 = start * winDur, e0 = i * winDur;
+        if (e0 - s0 >= minGap && e0 - s0 - 2 * pad > 0.2) silences.push([s0 + pad, e0 - pad]);
+        start = -1;
+      }
+    }
+    updSilInfo(); drawWave();
+  }
+
+  // skip over silent gaps while playing
+  setInterval(() => {
+    if (!cfg.skip || a.paused || !silences.length) return;
+    const t = a.currentTime; let lo = 0, hi = silences.length - 1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1, r = silences[m];
+      if (t < r[0]) hi = m - 1; else if (t >= r[1]) lo = m + 1; else { a.currentTime = r[1]; break; }
+    }
+  }, 40);
+
+  $("sgap").value = cfg.sgap || "1"; $("ssens").value = cfg.ssens || "normal"; updSkipBtn();
+  $("skipBtn").onclick = () => {
+    cfg.skip = !cfg.skip; save(); updSkipBtn(); updSilInfo(); drawWave();
+    msg(cfg.skip ? (silences.length ? "Silence will be skipped during playback." : "Silence removal is on (nothing to skip yet — load a file).") : "Silence removal off.");
+  };
+  $("sgap").onchange = () => { cfg.sgap = $("sgap").value; save(); computeSilences(); };
+  $("ssens").onchange = () => { cfg.ssens = $("ssens").value; save(); computeSilences(); };
+
+  // back to the original sound: no boost, no noise reduction, no leveler, no silence skipping, normal speed
+  $("resetFx").onclick = () => {
+    cfg.boost = 1; cfg.nr = "off"; cfg.lvl = false; cfg.skip = false; cfg.speed = "1"; save();
+    $("boost").value = 100; $("boostv").textContent = "100%"; $("nr").value = "off"; $("lvl").checked = false;
+    $("speed").value = "1"; a.playbackRate = 1; $("autoinfo").textContent = "";
+    if (ac) applyFx(); updSkipBtn(); updSilInfo(); drawWave();
+    msg("Reset to the original audio (no enhancement, no silence skipping, normal speed).");
+  };
+
+
+  // ---------- v7: pedal setup is saved once and used for every file ----------
+  async function openPedal(d) {
+    if (!d.opened) await d.open();
+    d.removeEventListener("inputreport", onReport); d.addEventListener("inputreport", onReport);
+    cfg.dev = { v: d.vendorId, p: d.productId }; save();
+    ps("Connected: " + (d.productName || "HID device"));
+  }
+  async function autoConnect() {                 // reconnect to a pedal that was already allowed, no clicking needed
+    if (!navigator.hid) return;
+    try {
+      const devs = await navigator.hid.getDevices(), want = cfg.dev;
+      const d = devs.find(x => want && x.vendorId === want.v && x.productId === want.p) || (want ? null : devs[0]);
+      if (d) await openPedal(d);
+      else if (Object.keys(cfg.map || {}).length) ps("Pedal setup is saved. Click Connect pedal (USB) once to reconnect.");
+    } catch (e) {}
+  }
+  function updMapInfo() {
+    const nm = { rew: "Rewind", play: "Play/Pause", fwd: "Forward" }, m = cfg.map || {};
+    $("mapinfo").textContent = "Saved pedal setup: " + ["rew", "play", "fwd"].map(k => nm[k] + (m[k] ? " ✓" : " –")).join("  ") + "  (used for every file)";
+  }
+  $("clearMap").onclick = () => { cfg.map = {}; cfg.dev = null; save(); updMapInfo(); ps("Pedal setup cleared. Use Learn to set it up again."); };
+  $("showMap").onclick = () => { $("pbackup").value = JSON.stringify({ map: cfg.map || {}, dev: cfg.dev || null }); $("pbackup").select(); };
+  $("loadMap").onclick = () => {
+    try {
+      const o = JSON.parse($("pbackup").value);
+      if (!o || typeof o.map !== "object") throw new Error("bad");
+      cfg.map = o.map; cfg.dev = o.dev || null; save(); updMapInfo(); ps("Pedal setup loaded."); autoConnect();
+    } catch (e) { ps("That doesn't look like a saved pedal setup."); }
+  };
+  if (navigator.hid) navigator.hid.addEventListener("connect", () => autoConnect());
+  cfg.map = cfg.map || {}; updMapInfo(); autoConnect();
 
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady();
 </script>
