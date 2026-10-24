@@ -50,6 +50,8 @@
   <div class="row muted">Noise reduction
     <select id="nr" style="width:auto"><option value="off">Off</option><option value="light">Light</option><option value="medium">Medium</option><option value="strong">Strong</option></select></div>
   <div class="row muted"><label><input type="checkbox" id="lvl"> Speech leveler (lifts quiet speech, evens out loud parts)</label></div>
+  <div class="row muted"><label><input type="checkbox" id="autoFx"> Auto-enhance when a file is loaded</label></div>
+  <div id="autoinfo" class="muted" style="margin-top:4px"></div>
   <div class="muted" style="margin-top:6px">Filters hum and hiss and lowers background between words. It can't remove noise that overlaps speech. High boost may distort.</div>
 </div>
 
@@ -78,6 +80,7 @@
 <div class="card">
   <b>Foot pedal</b>
   <div class="muted">Keys (pane focused): [ rewind, Space play/pause, ] forward. Pedals mapped to media keys also work.</div>
+  <div class="row muted"><label><input type="checkbox" id="hold"> Play only while the pedal is pressed (release stops)</label></div>
   <div class="row"><button id="connect" class="sec">Connect pedal (USB)</button></div>
   <div class="row muted">Learn:
     <button class="sec" data-learn="rew">Rewind</button>
@@ -89,7 +92,7 @@
   <div id="pstatus" class="muted"></div>
 </div>
 
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v4</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v5</div>
 
 <script>
   const $ = id => document.getElementById(id), a = $("a");
@@ -133,10 +136,13 @@
   // hold-to-repeat for pedal rewind/forward
   let hold = null;
   function press(act) {
-    if (act === "play") return toggle();
+    if (act === "play") {
+      if (cfg.hold !== false) { if (a.src && a.paused) { a.currentTime = Math.max(0, a.currentTime - cfg.auto); a.play(); } return; }
+      return toggle();
+    }
     const dir = act === "rew" ? -1 : 1; step(dir); clearInterval(hold); hold = setInterval(() => step(dir), 300);
   }
-  const release = () => clearInterval(hold);
+  const release = act => { if (act === "play") { if (cfg.hold !== false) a.pause(); } else clearInterval(hold); };
 
   // keyboard (works when the pane has focus)
   document.addEventListener("keydown", e => {
@@ -182,7 +188,7 @@
       for (const act in cfg.map) {
         const m = cfg.map[act]; if (m.id !== ev.reportId) continue;
         const now = (d[m.i] & m.mask) !== 0, was = (prev[m.i] & m.mask) !== 0;
-        if (now && !was) press(act); else if (!now && was) release();
+        if (now && !was) press(act); else if (!now && was) release(act);
       }
     }
     prev = d.slice();
@@ -278,6 +284,7 @@
     src.connect(fx.hp); fx.hp.connect(fx.lp); fx.lp.connect(fx.comp);
     fx.comp.connect(fx.an); fx.comp.connect(fx.gate); fx.gate.connect(fx.out); fx.out.connect(fx.lim); fx.lim.connect(ac.destination);
     a.volume = 1; applyFx();
+    if (ac.state === "suspended") ac.resume();
   }
 
   function applyFx() {
@@ -316,22 +323,25 @@
 
   async function buildWave(f) {
     const tok = ++waveTok; peaks = null; wavemsg = "Loading waveform..."; drawWave();
-    if (f.size > 80 * 1024 * 1024) { wavemsg = "File too large to draw a waveform"; drawWave(); return; }
+    if (f.size > 80 * 1024 * 1024) { wavemsg = "File too large to draw a waveform"; lastStats = null; if (cfg.autoFx !== false) autoEnhance(null); drawWave(); return; }
     try {
       const buf = await f.arrayBuffer();
       const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
       const d = await new OAC(1, 1, 8000).decodeAudioData(buf);
       if (tok !== waveTok) return;
       const N = 2000, c0 = d.getChannelData(0), c1 = d.numberOfChannels > 1 ? d.getChannelData(1) : null;
-      const step = Math.max(1, Math.floor(c0.length / N)), p = new Float32Array(N); let mx = 0;
+      const step = Math.max(1, Math.floor(c0.length / N)), p = new Float32Array(N), rms = new Float32Array(N); let mx = 0;
       for (let i = 0; i < N; i++) {
-        let m = 0; const st = i * step, en = Math.min(c0.length, st + step);
-        for (let j = st; j < en; j++) { let v = Math.abs(c0[j]); if (c1) v = Math.max(v, Math.abs(c1[j])); if (v > m) m = v; }
-        p[i] = m; if (m > mx) mx = m;
+        let m = 0, ss = 0, n = 0; const st = i * step, en = Math.min(c0.length, st + step);
+        for (let j = st; j < en; j++) { let v = Math.abs(c0[j]); if (c1) v = Math.max(v, Math.abs(c1[j])); if (v > m) m = v; ss += v * v; n++; }
+        p[i] = m; rms[i] = n ? Math.sqrt(ss / n) : 0; if (m > mx) mx = m;
       }
       if (mx > 0) for (let i = 0; i < N; i++) p[i] = Math.sqrt(p[i] / mx);   // sqrt scale shows quiet speech
       peaks = p;
-    } catch (e) { if (tok === waveTok) wavemsg = "Waveform not available for this file"; }
+      const sr = Array.from(rms).sort((x, y) => x - y), nf = Math.max(sr[Math.floor(N * 0.1)], 1e-5), sp = Math.max(sr[Math.floor(N * 0.9)], 1e-5);
+      lastStats = { snr: 20 * Math.log10(sp / nf), sp };
+      if (cfg.autoFx !== false) autoEnhance(lastStats);
+    } catch (e) { if (tok === waveTok) { wavemsg = "Waveform not available for this file"; lastStats = null; if (cfg.autoFx !== false) autoEnhance(null); } }
     if (tok === waveTok) drawWave();
   }
 
@@ -369,6 +379,26 @@
   ["pause", "seeked", "loadedmetadata", "ratechange"].forEach(ev => a.addEventListener(ev, drawWave));
   window.addEventListener("resize", drawWave);
   drawWave();
+
+
+  // ---------- v5: auto-enhance on load + pedal hold mode ----------
+  var lastStats = null;
+  function autoEnhance(st) {
+    cfg.lvl = true;
+    cfg.nr = st ? (st.snr < 15 ? "medium" : "light") : "light";
+    cfg.boost = st ? Math.min(4, Math.max(1, Math.round(0.1 / (st.sp * 1.4) * 10) / 10)) : 1;
+    $("boost").value = Math.round(cfg.boost * 100); $("boostv").textContent = $("boost").value + "%";
+    $("nr").value = cfg.nr; $("lvl").checked = true;
+    if (ac) applyFx();
+    const nrName = { light:"Light", medium:"Medium" }[cfg.nr];
+    $("autoinfo").textContent = "Auto-enhanced: boost " + $("boost").value + "%, noise reduction " + nrName + ", speech leveler on" +
+                                (st ? " (signal-to-noise about " + Math.round(st.snr) + " dB)" : "");
+    msg("Audio enhanced automatically. You can adjust the settings above.");
+  }
+  $("autoFx").checked = cfg.autoFx !== false;
+  $("autoFx").onchange = () => { cfg.autoFx = $("autoFx").checked; save(); if (cfg.autoFx && a.src) autoEnhance(lastStats); else if (!cfg.autoFx) $("autoinfo").textContent = ""; };
+  $("hold").checked = cfg.hold !== false;
+  $("hold").onchange = () => { cfg.hold = $("hold").checked; save(); };
 
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady();
 </script>
