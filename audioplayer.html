@@ -30,6 +30,7 @@
 <div id="name" class="muted">No file loaded</div>
 <audio id="a"></audio>
 
+<canvas id="wave" style="width:100%;height:80px;margin-top:10px;display:block;background:var(--card);border-radius:6px;cursor:pointer;touch-action:none"></canvas>
 <input id="seek" type="range" min="0" max="1000" value="0" style="margin-top:10px">
 <div class="row" style="justify-content:space-between"><span id="cur">0:00</span><span id="dur">0:00</span></div>
 <div class="row big"><button id="rew">⏪</button><button id="play">▶</button><button id="fwd">⏩</button></div>
@@ -42,6 +43,15 @@
 <div class="row muted">Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="1" style="flex:1"></div>
 <div class="row muted">Go to <input id="goto" class="t" placeholder="12:30"><button id="gotoBtn" class="sec">Go</button></div>
 <div id="msg"></div>
+
+<div class="card">
+  <b>Audio enhancement</b>
+  <div class="row muted">Volume boost <input id="boost" type="range" min="100" max="400" step="10" value="100" style="flex:1"> <span id="boostv">100%</span></div>
+  <div class="row muted">Noise reduction
+    <select id="nr" style="width:auto"><option value="off">Off</option><option value="light">Light</option><option value="medium">Medium</option><option value="strong">Strong</option></select></div>
+  <div class="row muted"><label><input type="checkbox" id="lvl"> Speech leveler (lifts quiet speech, evens out loud parts)</label></div>
+  <div class="muted" style="margin-top:6px">Filters hum and hiss and lowers background between words. It can't remove noise that overlaps speech. High boost may distort.</div>
+</div>
 
 <div class="card">
   <b>Loop a section</b>
@@ -79,7 +89,7 @@
   <div id="pstatus" class="muted"></div>
 </div>
 
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v2</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v4</div>
 
 <script>
   const $ = id => document.getElementById(id), a = $("a");
@@ -97,7 +107,7 @@
     const f = e.target.files[0]; if (!f) return;
     a.src = URL.createObjectURL(f); a.playbackRate = +cfg.speed;
     fileKey = "au:" + f.name + "|" + f.size; const sv = store.get(fileKey) || {}; marks = sv.marks || []; pendingPos = sv.pos || 0;
-    A = B = null; $("loop").checked = false; updLoop(); renderMarks();
+    A = B = null; $("loop").checked = false; updLoop(); renderMarks(); buildWave(f);
     $("name").textContent = f.name; $("name").className = "";
     if ("mediaSession" in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: f.name });
   };
@@ -196,7 +206,7 @@
 
   // volume
   a.volume = cfg.vol == null ? 1 : +cfg.vol; $("vol").value = a.volume;
-  $("vol").oninput = () => { a.volume = +$("vol").value; cfg.vol = a.volume; save(); };
+  $("vol").oninput = () => { cfg.vol = +$("vol").value; save(); a.volume = ac ? 1 : cfg.vol; applyFx(); };
 
   // go to time
   function parseTime(str) {
@@ -212,7 +222,7 @@
   $("gotoBtn").onclick = gotoTime; $("goto").addEventListener("keydown", e => { if (e.key === "Enter") gotoTime(); });
 
   // loop A-B
-  function updLoop() { $("loopinfo").textContent = A == null && B == null ? "A and B not set" : "A " + (A == null ? "–" : fmtS(A)) + "  →  B " + (B == null ? "–" : fmtS(B)); }
+  function updLoop() { $("loopinfo").textContent = A == null && B == null ? "A and B not set" : "A " + (A == null ? "–" : fmtS(A)) + "  →  B " + (B == null ? "–" : fmtS(B)); drawWave(); }
   $("setA").onclick = () => { if (!a.src) return; A = a.currentTime; updLoop(); };
   $("setB").onclick = () => { if (!a.src) return; B = a.currentTime; if (A != null && B <= A) msg("B must be after A"); updLoop(); };
   $("clearLoop").onclick = () => { A = B = null; $("loop").checked = false; updLoop(); };
@@ -225,6 +235,7 @@
       : '<div class="muted" style="margin-top:6px">No bookmarks yet</div>';
     $("marks").querySelectorAll("[data-go]").forEach(el => el.onclick = () => { a.currentTime = +el.dataset.go; });
     $("marks").querySelectorAll("[data-del]").forEach(el => el.onclick = () => { marks.splice(+el.dataset.del, 1); savePos(); renderMarks(); });
+    drawWave();
   }
   const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   function addMark() {
@@ -244,6 +255,120 @@
     } catch (e) { msg("Could not insert: " + e.message); }
   }
   $("stamp").onclick = stampNow;
+
+
+  // ---------- v3: volume boost + noise reduction (Web Audio) ----------
+  let ac = null, fx = {}, gateTh = null;
+  const NR = { off:{ hp:10, lp:20000, gate:null }, light:{ hp:80, lp:10000, gate:null },
+               medium:{ hp:120, lp:7000, gate:-55 }, strong:{ hp:200, lp:5000, gate:-45 } };
+
+  function ensureAudio() {
+    if (ac) { if (ac.state === "suspended") ac.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    ac = new AC();
+    const src = ac.createMediaElementSource(a);
+    fx.hp = ac.createBiquadFilter(); fx.hp.type = "highpass";
+    fx.lp = ac.createBiquadFilter(); fx.lp.type = "lowpass";
+    fx.comp = ac.createDynamicsCompressor();            // speech leveler
+    fx.an = ac.createAnalyser(); fx.an.fftSize = 1024;   // for the gate
+    fx.gate = ac.createGain();
+    fx.out = ac.createGain();                            // volume x boost
+    fx.lim = ac.createDynamicsCompressor();              // limiter against clipping
+    fx.lim.threshold.value = -2; fx.lim.knee.value = 0; fx.lim.ratio.value = 20; fx.lim.attack.value = 0.003; fx.lim.release.value = 0.1;
+    src.connect(fx.hp); fx.hp.connect(fx.lp); fx.lp.connect(fx.comp);
+    fx.comp.connect(fx.an); fx.comp.connect(fx.gate); fx.gate.connect(fx.out); fx.out.connect(fx.lim); fx.lim.connect(ac.destination);
+    a.volume = 1; applyFx();
+  }
+
+  function applyFx() {
+    if (!ac) return;
+    const n = NR[cfg.nr || "off"];
+    fx.hp.frequency.value = n.hp; fx.lp.frequency.value = n.lp; gateTh = n.gate;
+    if (gateTh == null) fx.gate.gain.setTargetAtTime(1, ac.currentTime, 0.02);
+    if (cfg.lvl) { fx.comp.threshold.value = -35; fx.comp.knee.value = 30; fx.comp.ratio.value = 4; fx.comp.attack.value = 0.01; fx.comp.release.value = 0.25; }
+    else { fx.comp.threshold.value = 0; fx.comp.knee.value = 0; fx.comp.ratio.value = 1; }
+    fx.out.gain.value = (cfg.vol == null ? 1 : +cfg.vol) * (cfg.boost || 1) * (cfg.lvl ? 1.4 : 1);
+  }
+
+  // simple noise gate: lowers the level during quiet gaps (between words)
+  const gbuf = new Float32Array(1024);
+  setInterval(() => {
+    if (!ac || gateTh == null || a.paused) return;
+    fx.an.getFloatTimeDomainData(gbuf);
+    let sum = 0; for (let i = 0; i < gbuf.length; i++) sum += gbuf[i] * gbuf[i];
+    const db = 20 * Math.log10(Math.sqrt(sum / gbuf.length) + 1e-9), quiet = db < gateTh;
+    fx.gate.gain.setTargetAtTime(quiet ? 0.15 : 1, ac.currentTime, quiet ? 0.15 : 0.02);
+  }, 50);
+
+  $("boost").value = Math.round((cfg.boost || 1) * 100); $("boostv").textContent = $("boost").value + "%";
+  $("nr").value = cfg.nr || "off"; $("lvl").checked = !!cfg.lvl;
+  $("boost").oninput = () => {
+    cfg.boost = +$("boost").value / 100; $("boostv").textContent = $("boost").value + "%"; save(); ensureAudio(); applyFx();
+    if (cfg.boost > 2.5) msg("High boost may distort. Try the Speech leveler instead.");
+  };
+  $("nr").onchange = () => { cfg.nr = $("nr").value; save(); ensureAudio(); applyFx(); };
+  $("lvl").onchange = () => { cfg.lvl = $("lvl").checked; save(); ensureAudio(); applyFx(); };
+  a.addEventListener("play", () => { if (cfg.boost > 1 || (cfg.nr && cfg.nr !== "off") || cfg.lvl || ac) ensureAudio(); });
+
+
+  // ---------- v4: waveform ----------
+  var peaks = null, wavemsg = "Import audio to see its waveform", waveTok = 0, raf = 0;
+
+  async function buildWave(f) {
+    const tok = ++waveTok; peaks = null; wavemsg = "Loading waveform..."; drawWave();
+    if (f.size > 80 * 1024 * 1024) { wavemsg = "File too large to draw a waveform"; drawWave(); return; }
+    try {
+      const buf = await f.arrayBuffer();
+      const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      const d = await new OAC(1, 1, 8000).decodeAudioData(buf);
+      if (tok !== waveTok) return;
+      const N = 2000, c0 = d.getChannelData(0), c1 = d.numberOfChannels > 1 ? d.getChannelData(1) : null;
+      const step = Math.max(1, Math.floor(c0.length / N)), p = new Float32Array(N); let mx = 0;
+      for (let i = 0; i < N; i++) {
+        let m = 0; const st = i * step, en = Math.min(c0.length, st + step);
+        for (let j = st; j < en; j++) { let v = Math.abs(c0[j]); if (c1) v = Math.max(v, Math.abs(c1[j])); if (v > m) m = v; }
+        p[i] = m; if (m > mx) mx = m;
+      }
+      if (mx > 0) for (let i = 0; i < N; i++) p[i] = Math.sqrt(p[i] / mx);   // sqrt scale shows quiet speech
+      peaks = p;
+    } catch (e) { if (tok === waveTok) wavemsg = "Waveform not available for this file"; }
+    if (tok === waveTok) drawWave();
+  }
+
+  function drawWave() {
+    const c = $("wave"); if (!c) return;
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight; if (!w) return;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+    const x = c.getContext("2d"); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, w, h);
+    const cs = getComputedStyle(document.documentElement), acc = cs.getPropertyValue("--accent").trim() || "#ea580c",
+          mut = cs.getPropertyValue("--muted").trim() || "#888", fg = cs.getPropertyValue("--fg").trim() || "#000";
+    const dur = a.duration || 0, ct = a.currentTime || 0;
+    if (!peaks) { x.fillStyle = mut; x.font = "12px Segoe UI, Arial"; x.textAlign = "center"; x.fillText(wavemsg, w / 2, h / 2 + 4); return; }
+    if (dur && A != null && B != null && B > A) { x.fillStyle = acc + "33"; x.fillRect(A / dur * w, 0, (B - A) / dur * w, h); }
+    const played = dur ? ct / dur * w : 0;
+    for (let px = 0; px < w; px++) {
+      const v = peaks[Math.min(peaks.length - 1, Math.floor(px / w * peaks.length))], bh = Math.max(1, v * h * 0.9);
+      x.fillStyle = px < played ? acc : mut; x.fillRect(px, (h - bh) / 2, 1, bh);
+    }
+    if (dur) {
+      x.fillStyle = fg; x.fillRect(played, 0, 2, h);
+      marks.forEach(m => { const mx = m.t / dur * w; x.beginPath(); x.moveTo(mx - 4, 0); x.lineTo(mx + 4, 0); x.lineTo(mx, 7); x.closePath(); x.fill(); });
+      [A, B].forEach(t => { if (t != null) x.fillRect(t / dur * w - 1, 0, 2, h); });
+    }
+  }
+
+  // click or drag on the waveform to seek
+  let dragW = false;
+  const seekFromEvent = ev => { const r = $("wave").getBoundingClientRect(); if (a.duration) a.currentTime = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * a.duration; };
+  $("wave").addEventListener("pointerdown", e => { dragW = true; $("wave").setPointerCapture(e.pointerId); seekFromEvent(e); });
+  $("wave").addEventListener("pointermove", e => { if (dragW) seekFromEvent(e); });
+  $("wave").addEventListener("pointerup", () => dragW = false);
+
+  function waveLoop() { drawWave(); if (!a.paused) raf = requestAnimationFrame(waveLoop); }
+  a.addEventListener("play", () => { cancelAnimationFrame(raf); waveLoop(); });
+  ["pause", "seeked", "loadedmetadata", "ratechange"].forEach(ev => a.addEventListener(ev, drawWave));
+  window.addEventListener("resize", drawWave);
+  drawWave();
 
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady();
 </script>
