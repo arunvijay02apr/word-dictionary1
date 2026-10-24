@@ -37,9 +37,10 @@
 <div class="row muted">
   Step <input id="step" type="number" min="1" max="60" value="5"> s
   Auto-rewind <input id="auto" type="number" min="0" max="10" value="2"> s
-  Speed <select id="speed"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select>
+  
 </div>
 
+<div class="row muted">Speed <input id="speedS" type="range" min="0.3" max="2" step="0.05" value="1" style="flex:1"> <span id="speedv" style="min-width:42px">1x</span><button id="speed1" class="sec" style="padding:3px 8px">1x</button></div>
 <div class="row muted">Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="1" style="flex:1"></div>
 <div class="row muted">Go to <input id="goto" class="t" placeholder="12:30"><button id="gotoBtn" class="sec">Go</button></div>
 <div id="msg"></div>
@@ -102,7 +103,7 @@
   </details>
 </div>
 
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v7</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v8</div>
 
 <script>
   const $ = id => document.getElementById(id), a = $("a");
@@ -110,10 +111,17 @@
   let cfg = { step:5, auto:2, speed:"1", map:{} };
   try { Object.assign(cfg, JSON.parse(localStorage.getItem("pcfg") || "{}")); } catch (e) {}
   const save = () => { try { localStorage.setItem("pcfg", JSON.stringify(cfg)); } catch (e) {} };
-  $("step").value = cfg.step; $("auto").value = cfg.auto; $("speed").value = cfg.speed; a.playbackRate = +cfg.speed;
+  $("step").value = cfg.step; $("auto").value = cfg.auto; setSpeed(+cfg.speed || 1, false); a.playbackRate = +cfg.speed;
   $("step").onchange = () => { cfg.step = +$("step").value || 5; save(); };
   $("auto").onchange = () => { cfg.auto = +$("auto").value || 0; save(); };
-  $("speed").onchange = () => { cfg.speed = $("speed").value; a.playbackRate = +cfg.speed; save(); };
+  function setSpeed(v, persist) {
+    v = Math.min(2, Math.max(0.3, Math.round(v * 100) / 100));
+    a.playbackRate = v; a.preservesPitch = true; a.webkitPreservesPitch = true;   // slow speech keeps its natural pitch
+    $("speedS").value = v; $("speedv").textContent = (+v.toFixed(2)) + "x"; cfg.speed = String(v);
+    if (persist) save();
+  }
+  $("speedS").oninput = () => setSpeed(+$("speedS").value, true);
+  $("speed1").onclick = () => setSpeed(1, true);
 
   $("import").onclick = () => $("file").click();
   $("file").onchange = e => {
@@ -468,7 +476,7 @@
   $("resetFx").onclick = () => {
     cfg.boost = 1; cfg.nr = "off"; cfg.lvl = false; cfg.skip = false; cfg.speed = "1"; save();
     $("boost").value = 100; $("boostv").textContent = "100%"; $("nr").value = "off"; $("lvl").checked = false;
-    $("speed").value = "1"; a.playbackRate = 1; $("autoinfo").textContent = "";
+    setSpeed(1, false); $("autoinfo").textContent = "";
     if (ac) applyFx(); updSkipBtn(); updSilInfo(); drawWave();
     msg("Reset to the original audio (no enhancement, no silence skipping, normal speed).");
   };
