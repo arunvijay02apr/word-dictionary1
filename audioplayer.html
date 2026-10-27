@@ -22,15 +22,18 @@
   .mk { display:flex; justify-content:space-between; align-items:center; padding:4px 0; border-bottom:1px solid var(--bg); }
   .mk a { cursor:pointer; color:var(--accent); text-decoration:underline; } .mk button { padding:2px 8px; }
   #msg { margin-top:8px; font-size:12px; color:var(--muted); }
+  body.mini > *:not(.keep):not(script) { display:none !important; }
+  #topbar { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
 </style>
 </head>
 <body>
+<div id="topbar" class="keep"><button id="miniBtn" class="sec">▾ Minimize</button><span id="minitime" class="muted">0:00 / 0:00</span></div>
 <button id="import">Import audio</button> <button id="clearAudio" class="sec">Clear audio</button>
 <input id="file" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.aac,.flac" hidden>
 <div id="name" class="muted">No file loaded</div>
 <audio id="a"></audio>
 
-<canvas id="wave" style="width:100%;height:80px;margin-top:10px;display:block;background:var(--card);border-radius:6px;cursor:pointer;touch-action:none"></canvas>
+<canvas id="wave" class="keep" style="width:100%;height:80px;margin-top:10px;display:block;background:var(--card);border-radius:6px;cursor:pointer;touch-action:none"></canvas>
 <input id="seek" type="range" min="0" max="1000" value="0" style="margin-top:10px">
 <div class="row" style="justify-content:space-between"><span id="cur">0:00</span><span id="dur">0:00</span></div>
 <div class="row big"><button id="rew">⏪</button><button id="play">▶</button><button id="fwd">⏩</button></div>
@@ -51,6 +54,8 @@
   <div class="row muted">Noise reduction
     <select id="nr" style="width:auto"><option value="off">Off</option><option value="light">Light</option><option value="medium">Medium</option><option value="strong">Strong</option></select></div>
   <div class="row muted"><label><input type="checkbox" id="lvl"> Speech leveler (lifts quiet speech, evens out loud parts)</label></div>
+  <div class="row muted">Stereo effect <select id="stfx" style="width:auto"><option value="off">Off</option><option value="mono">Both ears (mono)</option><option value="wide">Wide</option></select>
+    Width <input id="stw" type="range" min="0" max="100" value="50" style="flex:1"></div>
   <div class="row"><button id="skipBtn" class="sec">Remove silence: Off</button><button id="resetFx" class="sec">Reset to original</button></div>
   <div class="row muted">Gaps longer than <select id="sgap" style="width:auto"><option value="0.5">0.5 s</option><option value="1">1 s</option><option value="2">2 s</option></select>
     Sensitivity <select id="ssens" style="width:auto"><option value="gentle">Gentle</option><option value="normal">Normal</option><option value="aggressive">Aggressive</option></select></div>
@@ -103,7 +108,7 @@
   </details>
 </div>
 
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v9</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Transcription Player v10</div>
 
 <script>
   const $ = id => document.getElementById(id), a = $("a");
@@ -303,8 +308,10 @@
     fx.out = ac.createGain();                            // volume x boost
     fx.lim = ac.createDynamicsCompressor();              // limiter against clipping
     fx.lim.threshold.value = -2; fx.lim.knee.value = 0; fx.lim.ratio.value = 20; fx.lim.attack.value = 0.003; fx.lim.release.value = 0.1;
+    fx.mono = ac.createGain(); fx.mono.channelCount = 1; fx.mono.channelCountMode = "explicit"; fx.mono.channelInterpretation = "speakers";
+    fx.delay = ac.createDelay(0.1); fx.merge = ac.createChannelMerger(2);
     src.connect(fx.hp); fx.hp.connect(fx.lp); fx.lp.connect(fx.comp);
-    fx.comp.connect(fx.an); fx.comp.connect(fx.gate); fx.gate.connect(fx.out); fx.out.connect(fx.lim); fx.lim.connect(ac.destination);
+    fx.comp.connect(fx.an); fx.comp.connect(fx.gate); fx.gate.connect(fx.out); fx.lim.connect(ac.destination); applyStereo();
     a.volume = 1; applyFx();
     if (ac.state === "suspended") ac.resume();
   }
@@ -337,7 +344,7 @@
   };
   $("nr").onchange = () => { cfg.nr = $("nr").value; save(); ensureAudio(); applyFx(); };
   $("lvl").onchange = () => { cfg.lvl = $("lvl").checked; save(); ensureAudio(); applyFx(); };
-  a.addEventListener("play", () => { if (cfg.boost > 1 || (cfg.nr && cfg.nr !== "off") || cfg.lvl || ac) ensureAudio(); });
+  a.addEventListener("play", () => { if (cfg.boost > 1 || (cfg.nr && cfg.nr !== "off") || cfg.lvl || (cfg.st && cfg.st !== "off") || ac) ensureAudio(); });
 
 
   // ---------- v4: waveform ----------
@@ -480,10 +487,10 @@
 
   // back to the original sound: no boost, no noise reduction, no leveler, no silence skipping, normal speed
   $("resetFx").onclick = () => {
-    cfg.boost = 1; cfg.nr = "off"; cfg.lvl = false; cfg.skip = false; cfg.speed = "1"; save();
+    cfg.boost = 1; cfg.nr = "off"; cfg.lvl = false; cfg.skip = false; cfg.speed = "1"; cfg.st = "off"; save(); $("stfx").value = "off";
     $("boost").value = 100; $("boostv").textContent = "100%"; $("nr").value = "off"; $("lvl").checked = false;
     setSpeed(1, false); $("autoinfo").textContent = "";
-    if (ac) applyFx(); updSkipBtn(); updSilInfo(); drawWave();
+    if (ac) { applyFx(); applyStereo(); } updSkipBtn(); updSilInfo(); drawWave();
     msg("Reset to the original audio (no enhancement, no silence skipping, normal speed).");
   };
 
@@ -551,11 +558,37 @@
     fileKey = null; marks = []; pendingPos = 0; A = B = null; $("loop").checked = false;
     peaks = null; wrms = null; silences = []; lastStats = null; waveTok++; wavemsg = "Import audio to see its waveform";
     $("name").className = "muted"; $("name").textContent = "No file loaded";
-    $("cur").textContent = "0:00"; $("dur").textContent = "0:00"; $("seek").value = 0; $("autoinfo").textContent = "";
+    $("cur").textContent = "0:00"; $("dur").textContent = "0:00"; $("minitime").textContent = "0:00 / 0:00"; $("seek").value = 0; $("autoinfo").textContent = "";
     updLoop(); renderMarks(); updSilInfo(); drawWave(); delAudio(); msg("Audio cleared.");
   }
   $("clearAudio").onclick = clearAudio;
   restoreAudio();
+
+
+  // ---------- v10: stereo effect + minimize ----------
+  function applyStereo() {
+    if (!ac || !fx.mono) return;
+    [fx.out, fx.mono, fx.delay, fx.merge].forEach(n => { try { n.disconnect(); } catch (e) {} });
+    const m = cfg.st || "off";
+    if (m === "off") fx.out.connect(fx.lim);
+    else if (m === "mono") { fx.out.connect(fx.mono); fx.mono.connect(fx.lim); }
+    else {                                           // wide: right ear gets a slightly delayed copy
+      fx.delay.delayTime.value = 0.004 + (cfg.sw == null ? 0.5 : cfg.sw) * 0.026;
+      fx.out.connect(fx.mono); fx.mono.connect(fx.merge, 0, 0); fx.mono.connect(fx.delay); fx.delay.connect(fx.merge, 0, 1); fx.merge.connect(fx.lim);
+    }
+  }
+  $("stfx").value = cfg.st || "off"; $("stw").value = Math.round((cfg.sw == null ? 0.5 : cfg.sw) * 100);
+  $("stfx").onchange = () => { cfg.st = $("stfx").value; save(); ensureAudio(); applyStereo(); };
+  $("stw").oninput = () => { cfg.sw = +$("stw").value / 100; save(); if (ac && fx.delay) fx.delay.delayTime.value = 0.004 + cfg.sw * 0.026; };
+
+  function setMini(on) {
+    cfg.mini = on; document.body.classList.toggle("mini", on);
+    $("miniBtn").textContent = on ? "▴ Expand" : "▾ Minimize"; save(); setTimeout(drawWave, 50);
+  }
+  $("miniBtn").onclick = () => setMini(!document.body.classList.contains("mini"));
+  const updMiniTime = () => { $("minitime").textContent = fmt(a.currentTime) + " / " + fmt(a.duration); };
+  a.addEventListener("timeupdate", updMiniTime); a.addEventListener("loadedmetadata", updMiniTime);
+  if (cfg.mini) setMini(true);
 
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady();
 </script>
