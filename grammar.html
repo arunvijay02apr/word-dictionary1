@@ -42,7 +42,7 @@
 <button id="check">Check selected text</button>
 <div id="status">Select a paragraph in your document, then click the button.</div>
 <div id="result"></div>
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Grammar Check v2 (auto-check)</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Grammar Check v3 (auto-check, Ctrl+/)</div>
 
 <script>
   const $ = id => document.getElementById(id);
@@ -86,8 +86,9 @@
     if (cfg.provider === "groq") {
       r = await fetch("https://api.groq.com/openai/v1/chat/completions", { method:"POST",
         headers:{ "Content-Type":"application/json", "Authorization":"Bearer " + cfg.key },
-        body: JSON.stringify({ model, temperature:0, response_format:{ type:"json_object" },
-          messages:[{ role:"system", content:sys }, { role:"user", content:text }] }) });
+        body: JSON.stringify(Object.assign({ model, temperature:0, response_format:{ type:"json_object" },
+          messages:[{ role:"system", content:sys }, { role:"user", content:text }] },
+          /^openai\/gpt-oss/.test(model) ? { reasoning_effort:"low" } : {})) });
       if (!r.ok) throw new Error("Groq " + r.status + ": " + (await r.text()).slice(0, 200));
       raw = (await r.json()).choices[0].message.content;
     } else if (cfg.provider === "gemini") {
@@ -188,8 +189,26 @@
     }, 800);
   }
 
+  // ---- Ctrl+/ support ----
+  // The Word macro "LookupSelection" briefly empties the selection and then restores it.
+  // An empty selection followed within 3 s by the same text means "look this up now".
+  var _emptyAt = 0, _prevText = "";
+  function watchSelection(onForce) {
+    Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, () => {
+      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, r => {
+        if (r.status !== "succeeded") return;
+        const t = String(r.value || "").trim(), now = Date.now();
+        if (!t) { _emptyAt = now; return; }
+        if (now - _emptyAt < 3000 && t === _prevText) onForce(t);
+        _prevText = t;
+      });
+    });
+  }
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady(i => {
-    if (i && i.host) Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onSelection);
+    if (i && i.host) {
+      Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onSelection);
+      watchSelection(t => { lastAuto = t; doCheck(false); });
+    }
   });
 </script>
 </body>

@@ -42,6 +42,7 @@
 <div id="status">Select a word or short term (up to 6 words) in your document.</div>
 <div id="result"></div>
 
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Medical Term Check v2 (Ctrl+/)</div>
 <script>
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -154,8 +155,26 @@
   $("go").onclick = () => { const t = clean($("q").value); if (t) { last = t.toLowerCase(); check(t); } };
   $("q").addEventListener("keydown", e => { if (e.key === "Enter") $("go").click(); });
 
+  // ---- Ctrl+/ support ----
+  // The Word macro "LookupSelection" briefly empties the selection and then restores it.
+  // An empty selection followed within 3 s by the same text means "look this up now".
+  var _emptyAt = 0, _prevText = "";
+  function watchSelection(onForce) {
+    Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, () => {
+      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, r => {
+        if (r.status !== "succeeded") return;
+        const t = String(r.value || "").trim(), now = Date.now();
+        if (!t) { _emptyAt = now; return; }
+        if (now - _emptyAt < 3000 && t === _prevText) onForce(t);
+        _prevText = t;
+      });
+    });
+  }
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady(i => {
-    if (i && i.host) Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onSelection);
+    if (i && i.host) {
+      Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onSelection);
+      watchSelection(t => { const c = clean(t); if (!c || c.length > 80 || c.split(" ").length > 6) return; last = c.toLowerCase(); $("q").value = c; check(c); });
+    }
   });
 </script>
 </body>

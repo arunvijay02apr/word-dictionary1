@@ -29,6 +29,7 @@
 </div>
 <div id="out" class="hint">Select or double-click a word in your document.</div>
 
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Quick Dictionary v2 (Ctrl+/)</div>
 <script>
   let lastWord = "", timer = null, currentReq = 0;
   const out = document.getElementById("out");
@@ -165,10 +166,31 @@
   };
   document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("go").click(); });
 
+  // ---- Ctrl+/ support ----
+  // The Word macro "LookupSelection" briefly empties the selection and then restores it.
+  // An empty selection followed within 3 s by the same text means "look this up now".
+  var _emptyAt = 0, _prevText = "";
+  function watchSelection(onForce) {
+    Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, () => {
+      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, r => {
+        if (r.status !== "succeeded") return;
+        const t = String(r.value || "").trim(), now = Date.now();
+        if (!t) { _emptyAt = now; return; }
+        if (now - _emptyAt < 3000 && t === _prevText) onForce(t);
+        _prevText = t;
+      });
+    });
+  }
+  function forceLookup(t) {
+    const w = String(t).trim().split(/\s+/)[0].replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "");
+    if (!w || w.length < 2 || w.length > 30 || /[^A-Za-z'\-]/.test(w)) return;
+    lastWord = w.toLowerCase(); document.getElementById("q").value = w; lookup(w);
+  }
   if (typeof Office !== "undefined" && Office.onReady) {
     Office.onReady(info => {
       if (info && info.host) {
         Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, handleSelection);
+        watchSelection(forceLookup);
         out.textContent = "Select or double-click a word in your document.";
       } else {
         out.textContent = "Open this pane inside Word to look up selected words. You can still type a word above.";
