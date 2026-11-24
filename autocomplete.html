@@ -48,7 +48,7 @@
 <div id="status"></div>
 <div id="diag"></div>
 <div class="row" style="margin-top:10px"><button id="refresh" class="sec">Refresh document words</button></div>
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Autocomplete v2 · click a suggestion or press its number while this pane has focus</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Autocomplete v3 · click a suggestion or press its number while this pane has focus</div>
 
 <script>
   const $ = id => document.getElementById(id);
@@ -106,7 +106,8 @@
   $("refresh").onclick = async () => { await learnDoc(); $("status").textContent = docWords.size + " words learned from this document."; };
 
   // ---------- suggestions ----------
-  let suggestions = [], req = 0, evTimer = null, aiTimer = null;
+  let suggestions = [], req = 0, evTimer = null, aiTimer = null, aiCache = { before: null, items: [] };
+  const suggestFor = before => localSuggest(before).concat(aiCache.before === before ? aiCache.items : []).slice(0, 8);
 
   function localSuggest(before) {
     const out = [], seen = new Set(), add = (c, tail, src) => { if (c && !seen.has(c)) { seen.add(c); out.push({ c, tail, src }); } };
@@ -156,8 +157,9 @@
   async function refresh(force) {
     let c;
     try { c = await readContext(); } catch (e) { $("diag").textContent = "Cannot read the document: " + e.message; return; }
-    if (!c.empty) return;                                    // keep the list while text is selected
+    if (!c.empty || _movedAt) return;                        // keep the list while text is selected or the accept key is working
     if (!force && c.before === lastBefore) return;           // nothing new
+    if (_movedAt) return;
     lastBefore = c.before; const before = c.before, my = ++req;
     $("ctx").textContent = before ? "…" + before.slice(-60) : "Start of paragraph";
     suggestions = localSuggest(before); render(); updDiag();
@@ -172,7 +174,12 @@
       $("status").textContent = "Inserted: " + text;
     } catch (e) { $("status").textContent = "Could not insert: " + e.message; }
   }
-  const acceptTop = () => { if (suggestions.length) insertCompletion(suggestions[0].c); else $("status").textContent = "No suggestion to accept."; };
+  const acceptTop = bang => {
+    const list = _stable != null ? suggestFor(_stable) : suggestions;
+    if (list.length) insertCompletion(list[0].c);
+    else if (bang) insertCompletion("!");                 // nothing to accept: type the "!" the macro swallowed
+    else $("status").textContent = "No suggestion to accept.";
+  };
 
   document.addEventListener("keydown", e => {
     if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
@@ -207,31 +214,36 @@
     try {
       const res = await callAI(before.slice(-300));
       if (my !== req) return;                              // you kept typing, ignore this one
-      const comps = Array.isArray(res.completions) ? res.completions : [];
-      comps.forEach(c => {
+      const items = [];
+      (Array.isArray(res.completions) ? res.completions : []).forEach(c => {
         c = String(c || ""); if (!c.trim()) return;
         if (before && !/\s$/.test(before) && !/^[\s.,;:!?)]/.test(c) && /[A-Za-z0-9]$/.test(before) && /^[A-Z]/.test(c)) c = " " + c;   // new word after a finished word
-        if (!suggestions.some(s => s.c === c)) suggestions.push({ c, tail: before.slice(-12), src: "AI" });
+        items.push({ c, tail: before.slice(-12), src: "AI" });
       });
-      suggestions = suggestions.slice(0, 8); render();
+      aiCache = { before, items }; suggestions = suggestFor(before); render();
     } catch (e) { if (my === req) $("status").textContent = "AI suggestion failed: " + e.message; }
   }
 
-  // ---------- accept key: the Word macro AcceptSuggestion ----------
-  // The macro briefly selects the character before the cursor and then collapses again.
-  // "1 character selected, then empty again" within 2.5 s means "insert the top suggestion".
-  var _prevEmpty = true, _oneAt = 0;
-  function watchAccept() {
-    Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, () => {
-      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, r => {
-        if (r.status !== "succeeded") return;
-        const len = String(r.value || "").length, now = Date.now();
-        if (len === 1 && _prevEmpty) { _oneAt = now; _prevEmpty = false; return; }
-        if (len === 0) { if (!_prevEmpty && now - _oneAt < 2500) { _oneAt = 0; acceptTop(); } _prevEmpty = true; return; }
-        _prevEmpty = false;
-      });
-    });
+  // ---------- accept key: the Word macros AcceptSuggestion (Ctrl+Alt+Z) and AcceptWithBang ("!") ----------
+  // The macro moves the cursor 4 characters left (5 for the "!" version), waits, and moves it back.
+  // "caret moved left by 4 or 5, then back to the same spot" means "insert the top suggestion".
+  var _stable = null, _movedAt = 0, _movedN = 0;
+  async function onStepEvent() {
+    let c; try { c = await readContext(); } catch (e) { return; }
+    if (!c.empty) return;
+    const b = c.before, now = Date.now();
+    if (_movedAt) {
+      if (b === _stable) { const bang = _movedN === 5; _movedAt = 0; acceptTop(bang); return; }
+      if (now - _movedAt > 2500 || !_stable.startsWith(b)) { _movedAt = 0; _stable = b; }
+      return;
+    }
+    if (_stable != null) {
+      const n = _stable.length - b.length;
+      if ((n === 4 || n === 5) && _stable.startsWith(b)) { _movedAt = now; _movedN = n; return; }
+    }
+    _stable = b;
   }
+  function watchAccept() { Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onStepEvent); }
 
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady(i => {
     if (i && i.host) {
