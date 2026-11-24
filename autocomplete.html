@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autocomplete</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#1f2937; --muted:#6b7280; --accent:#2563eb; --card:#f3f4f6; --top:#dbeafe; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1f1f1f; --fg:#e5e7eb; --muted:#9ca3af; --accent:#60a5fa; --card:#2b2b2b; --top:#1e3a5f; } }
+  body { font-family:"Segoe UI",Arial,sans-serif; margin:0; padding:12px; background:var(--bg); color:var(--fg); font-size:14px; }
+  label { display:block; margin-top:8px; color:var(--muted); font-size:12px; }
+  input,select,textarea { width:100%; box-sizing:border-box; padding:6px; border:1px solid var(--muted); border-radius:4px; background:var(--bg); color:var(--fg); font-family:inherit; }
+  input[type=checkbox] { width:auto; }
+  button { padding:6px 10px; border:0; border-radius:4px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.sec { background:var(--muted); }
+  details { background:var(--card); border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+  #ctx { color:var(--muted); font-size:12px; margin:10px 0 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sug { display:flex; gap:8px; align-items:baseline; width:100%; text-align:left; background:var(--card); color:var(--fg); margin-top:5px; padding:8px 10px; font-size:14px; }
+  .sug.top { background:var(--top); }
+  .sug .n { color:var(--muted); font-size:12px; min-width:14px; }
+  .sug .t { color:var(--muted); } .sug .t b { color:var(--fg); }
+  .src { margin-left:auto; font-size:11px; color:var(--muted); }
+  #status { color:var(--muted); margin-top:8px; font-size:12px; }
+</style>
+</head>
+<body>
+<details id="settings">
+  <summary>Settings</summary>
+  <label>Your own terms and phrases (one per line)</label>
+  <textarea id="terms" rows="5" placeholder="pectoralis major muscle&#10;range of movement&#10;on examination there was"></textarea>
+  <label><input type="checkbox" id="learn" checked> Suggest words already used in this document</label>
+  <label><input type="checkbox" id="ai"> AI phrase suggestions (sends the text before your cursor to the AI provider as you type)</label>
+  <div id="aiset" style="display:none">
+    <label>AI provider</label>
+    <select id="provider"><option value="groq">Groq (free tier)</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama (local, on this PC)</option></select>
+    <label>API key (stored only in Word on this PC)</label>
+    <input id="key" type="password" placeholder="Paste your API key">
+    <label>Model</label><input id="model">
+  </div>
+</details>
+
+<div id="ctx">Click in your document and start typing.</div>
+<div id="list"></div>
+<div id="status"></div>
+<div class="row" style="margin-top:10px"><button id="refresh" class="sec">Refresh document words</button></div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Autocomplete v1 · click a suggestion or press its number while this pane has focus</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const DEFAULT_MODEL = { groq:"openai/gpt-oss-120b", gemini:"gemini-3.8-flash", ollama:"llama3.1" };
+  let cfg = { provider:"groq", key:"", model:"" };
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem("gcfg") || "{}")); } catch (e) {}   // shared with the other add-ins
+  const store = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+
+  $("terms").value = store.get("acTerms", ""); $("learn").checked = store.get("acLearn", "1") === "1"; $("ai").checked = store.get("acAI", "0") === "1";
+  $("provider").value = cfg.provider; $("key").value = cfg.key; $("model").value = cfg.model || DEFAULT_MODEL[cfg.provider];
+  const showAi = () => { $("aiset").style.display = $("ai").checked ? "block" : "none"; };
+  showAi();
+  let terms = [];
+  const loadTerms = () => { terms = $("terms").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); };
+  loadTerms();
+  $("terms").addEventListener("change", () => { store.set("acTerms", $("terms").value); loadTerms(); });
+  $("learn").addEventListener("change", () => { store.set("acLearn", $("learn").checked ? "1" : "0"); if ($("learn").checked) learnDoc(); });
+  $("ai").addEventListener("change", () => { store.set("acAI", $("ai").checked ? "1" : "0"); showAi(); });
+  function saveCfg() {
+    let keep = {}; try { keep = JSON.parse(localStorage.getItem("gcfg") || "{}"); } catch (e) {}
+    cfg = Object.assign(keep, { provider:$("provider").value, key:$("key").value.trim(), model:$("model").value.trim() });
+    store.set("gcfg", JSON.stringify(cfg));
+  }
+  ["key","model"].forEach(id => $(id).addEventListener("change", saveCfg));
+  $("provider").addEventListener("change", () => { $("model").value = DEFAULT_MODEL[$("provider").value]; saveCfg(); });
+
+  // ---------- words from the document ----------
+  let docWords = new Map();
+  async function learnDoc() {
+    if (!$("learn").checked) return;
+    try {
+      const text = await Word.run(async ctx => { const b = ctx.document.body; b.load("text"); await ctx.sync(); return b.text; });
+      const m = new Map();
+      (text.match(/[A-Za-z][A-Za-z'’-]{3,}/g) || []).forEach(w => { const k = w.toLowerCase(); m.set(k, (m.get(k) || 0) + 1); });
+      docWords = m;
+    } catch (e) {}
+  }
+  $("refresh").onclick = async () => { await learnDoc(); $("status").textContent = docWords.size + " words learned from this document."; };
+
+  // ---------- suggestions ----------
+  let suggestions = [], req = 0, evTimer = null, aiTimer = null;
+
+  function localSuggest(before) {
+    const out = [], seen = new Set(), add = (c, tail, src) => { if (c && !seen.has(c)) { seen.add(c); out.push({ c, tail, src }); } };
+    const words = before.split(/\s+/);
+    // 1) your own terms and phrases: match the end of what you typed against the start of each term
+    terms.forEach(term => {
+      const tl = term.toLowerCase();
+      for (let n = 1; n <= 4; n++) {
+        const tail = words.slice(-n).join(" ");
+        if (tail.trim().length < 2) continue;
+        if (tl.startsWith(tail.toLowerCase()) && tl.length > tail.length) { add(term.slice(tail.length), tail, "your list"); break; }
+      }
+    });
+    // 2) words already in this document
+    const partial = (before.match(/[A-Za-z][A-Za-z'’-]*$/) || [""])[0], pl = partial.toLowerCase();
+    if (partial.length >= 3 && docWords.size) {
+      Array.from(docWords.entries()).filter(([w]) => w.startsWith(pl) && w.length > pl.length)
+        .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length).slice(0, 5)
+        .forEach(([w]) => add(w.slice(pl.length), partial, "document"));
+    }
+    return out.slice(0, 8);
+  }
+
+  function render() {
+    $("list").innerHTML = suggestions.map((s, i) =>
+      '<button class="sug' + (i === 0 ? " top" : "") + '" data-i="' + i + '"><span class="n">' + (i + 1) + '</span><span class="t">' +
+      esc(s.tail.slice(-18)) + "<b>" + esc(s.c) + '</b></span><span class="src">' + (i === 0 ? "★ " : "") + esc(s.src) + "</span></button>").join("");
+    $("list").querySelectorAll("button[data-i]").forEach(b => b.onclick = () => insertCompletion(suggestions[+b.dataset.i].c));
+    if (!suggestions.length) $("status").textContent = "";
+  }
+
+  async function readContext() {
+    return Word.run(async ctx => {
+      const sel = ctx.document.getSelection(); sel.load("isEmpty");
+      const before = sel.paragraphs.getFirst().getRange("Start").expandTo(sel.getRange("Start")); before.load("text");
+      await ctx.sync();
+      return { empty: sel.isEmpty, before: before.text };
+    });
+  }
+
+  function onCaret() {
+    clearTimeout(evTimer);
+    evTimer = setTimeout(async () => {
+      const my = ++req; let c;
+      try { c = await readContext(); } catch (e) { return; }
+      if (my !== req || !c.empty) return;                // keep the list while text is selected
+      const before = c.before;
+      $("ctx").textContent = before ? "…" + before.slice(-60) : "Start of paragraph";
+      suggestions = localSuggest(before); render();
+      if ($("ai").checked && before.trim().length >= 12) { clearTimeout(aiTimer); aiTimer = setTimeout(() => aiSuggest(before, my), 600); }
+    }, 250);
+  }
+
+  async function insertCompletion(text) {
+    try {
+      await Word.run(async ctx => { const r = ctx.document.getSelection().insertText(text, "End"); r.select("End"); await ctx.sync(); });
+      $("status").textContent = "Inserted: " + text;
+    } catch (e) { $("status").textContent = "Could not insert: " + e.message; }
+  }
+  const acceptTop = () => { if (suggestions.length) insertCompletion(suggestions[0].c); else $("status").textContent = "No suggestion to accept."; };
+
+  document.addEventListener("keydown", e => {
+    if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+    const n = +e.key; if (n >= 1 && n <= suggestions.length) insertCompletion(suggestions[n - 1].c);
+  });
+
+  // ---------- AI phrase suggestions ----------
+  const SYS = "You are an autocomplete engine for professional medical transcription and report writing. Given the text before the cursor, suggest up to 3 short continuations (3 to 10 words each) that naturally continue the text, including finishing a partly typed word. Never repeat the existing text. Match the spelling style of the text. Respond ONLY with JSON: {\"completions\":[\"...\"]}";
+  async function callAI(text) {
+    const model = cfg.model || DEFAULT_MODEL[cfg.provider]; let r, raw;
+    if (cfg.provider === "groq") {
+      const body = { model, temperature:0.3, response_format:{ type:"json_object" }, messages:[{ role:"system", content:SYS }, { role:"user", content:text }] };
+      if (/^openai\/gpt-oss/.test(model)) body.reasoning_effort = "low";
+      r = await fetch("https://api.groq.com/openai/v1/chat/completions", { method:"POST", headers:{ "Content-Type":"application/json", "Authorization":"Bearer " + cfg.key }, body:JSON.stringify(body) });
+      if (!r.ok) throw new Error("Groq " + r.status);
+      raw = (await r.json()).choices[0].message.content;
+    } else if (cfg.provider === "gemini") {
+      r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(cfg.key),
+        { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ systemInstruction:{ parts:[{ text:SYS }] }, contents:[{ role:"user", parts:[{ text }] }], generationConfig:{ temperature:0.3, responseMimeType:"application/json" } }) });
+      if (!r.ok) throw new Error("Gemini " + r.status);
+      raw = (await r.json()).candidates[0].content.parts[0].text;
+    } else {
+      r = await fetch("http://localhost:11434/api/chat", { method:"POST", body:JSON.stringify({ model, stream:false, format:"json", messages:[{ role:"system", content:SYS }, { role:"user", content:text }] }) });
+      if (!r.ok) throw new Error("Ollama " + r.status);
+      raw = (await r.json()).message.content;
+    }
+    return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim());
+  }
+  async function aiSuggest(before, my) {
+    saveCfg();
+    if (cfg.provider !== "ollama" && !cfg.key) { $("status").textContent = "Add your API key in Settings for AI suggestions."; return; }
+    try {
+      const res = await callAI(before.slice(-300));
+      if (my !== req) return;                              // you kept typing, ignore this one
+      const comps = Array.isArray(res.completions) ? res.completions : [];
+      comps.forEach(c => {
+        c = String(c || ""); if (!c.trim()) return;
+        if (before && !/\s$/.test(before) && !/^[\s.,;:!?)]/.test(c) && /[A-Za-z0-9]$/.test(before) && /^[A-Z]/.test(c)) c = " " + c;   // new word after a finished word
+        if (!suggestions.some(s => s.c === c)) suggestions.push({ c, tail: before.slice(-12), src: "AI" });
+      });
+      suggestions = suggestions.slice(0, 8); render();
+    } catch (e) { if (my === req) $("status").textContent = "AI suggestion failed: " + e.message; }
+  }
+
+  // ---------- accept key: the Word macro AcceptSuggestion ----------
+  // The macro briefly selects the character before the cursor and then collapses again.
+  // "1 character selected, then empty again" within 2.5 s means "insert the top suggestion".
+  var _prevEmpty = true, _oneAt = 0;
+  function watchAccept() {
+    Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, () => {
+      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, r => {
+        if (r.status !== "succeeded") return;
+        const len = String(r.value || "").length, now = Date.now();
+        if (len === 1 && _prevEmpty) { _oneAt = now; _prevEmpty = false; return; }
+        if (len === 0) { if (!_prevEmpty && now - _oneAt < 2500) { _oneAt = 0; acceptTop(); } _prevEmpty = true; return; }
+        _prevEmpty = false;
+      });
+    });
+  }
+
+  if (typeof Office !== "undefined" && Office.onReady) Office.onReady(i => {
+    if (i && i.host) {
+      Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onCaret);
+      watchAccept(); learnDoc(); setInterval(learnDoc, 60000); onCaret();
+    } else $("ctx").textContent = "Open this pane inside Word.";
+  });
+</script>
+</body>
+</html>
