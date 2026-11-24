@@ -21,6 +21,8 @@
   .sug .n { color:var(--muted); font-size:12px; min-width:14px; }
   .sug .t { color:var(--muted); } .sug .t b { color:var(--fg); }
   .src { margin-left:auto; font-size:11px; color:var(--muted); }
+  .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+  #diag { color:var(--muted); font-size:11px; margin-top:8px; }
   #status { color:var(--muted); margin-top:8px; font-size:12px; }
 </style>
 </head>
@@ -29,6 +31,7 @@
   <summary>Settings</summary>
   <label>Your own terms and phrases (one per line)</label>
   <textarea id="terms" rows="5" placeholder="pectoralis major muscle&#10;range of movement&#10;on examination there was"></textarea>
+  <label><input type="checkbox" id="builtin" checked> Suggest common medical phrases (built in)</label>
   <label><input type="checkbox" id="learn" checked> Suggest words already used in this document</label>
   <label><input type="checkbox" id="ai"> AI phrase suggestions (sends the text before your cursor to the AI provider as you type)</label>
   <div id="aiset" style="display:none">
@@ -43,8 +46,9 @@
 <div id="ctx">Click in your document and start typing.</div>
 <div id="list"></div>
 <div id="status"></div>
+<div id="diag"></div>
 <div class="row" style="margin-top:10px"><button id="refresh" class="sec">Refresh document words</button></div>
-<div style="margin-top:16px;color:var(--muted);font-size:11px">Autocomplete v1 · click a suggestion or press its number while this pane has focus</div>
+<div style="margin-top:16px;color:var(--muted);font-size:11px">Autocomplete v2 · click a suggestion or press its number while this pane has focus</div>
 
 <script>
   const $ = id => document.getElementById(id);
@@ -58,7 +62,23 @@
   $("provider").value = cfg.provider; $("key").value = cfg.key; $("model").value = cfg.model || DEFAULT_MODEL[cfg.provider];
   const showAi = () => { $("aiset").style.display = $("ai").checked ? "block" : "none"; };
   showAi();
+
+  const BUILTIN = ["on examination there was","range of movement","range of motion","no evidence of","past medical history","presenting complaint","history of presenting complaint",
+    "social history","family history","drug history","mental state examination","risk assessment","in my opinion","to a reasonable degree of medical probability",
+    "on the balance of probabilities","pre-existing condition","asymptomatic","bilateral","unremarkable","tenderness","paraspinal muscle spasm","no acute intracranial abnormality",
+    "no focal consolidation","no pleural effusion","no pneumothorax","cardiomegaly","mild degenerative changes","disc desiccation","disc protrusion","disc bulge",
+    "spinal canal stenosis","neural foraminal narrowing","paravertebral","osteophyte formation","joint effusion","soft tissue swelling","undisplaced fracture","comminuted fracture",
+    "clinical history","anterior cruciate ligament","posterior cruciate ligament","medial collateral ligament","lateral collateral ligament","rotator cuff tear","supraspinatus tendon",
+    "acromioclavicular joint","glenohumeral joint","carpal tunnel syndrome","lumbar spine","cervical spine","thoracic spine","sacroiliac joint","total knee replacement",
+    "total hip replacement","pectoralis major muscle","last menstrual period","dilatation and curettage","hysterectomy","endometriosis","polycystic ovary syndrome","cervical smear",
+    "the uterus is anteverted","the ovaries are normal","visual acuity","best corrected visual acuity","intraocular pressure","slit lamp examination","fundus examination","anterior chamber",
+    "cataract extraction","intraocular lens","diabetic retinopathy","age-related macular degeneration","pupils equal and reactive to light","extraocular movements","major depressive disorder",
+    "generalised anxiety disorder","post-traumatic stress disorder","obsessive compulsive disorder","suicidal ideation","auditory hallucinations","thought disorder","insight and judgement",
+    "mood congruent","speech was normal in rate and rhythm","orientated in time, place and person","no evidence of psychosis","cognitive behavioural therapy","medication","hypertension","diabetes mellitus"];
+  $("builtin").checked = store.get("acBuiltin", "1") === "1";
+  $("builtin").addEventListener("change", () => { store.set("acBuiltin", $("builtin").checked ? "1" : "0"); refresh(true); });
   let terms = [];
+  const termList = () => terms.map(t => [t, "your list"]).concat($("builtin").checked ? BUILTIN.map(t => [t, "built-in"]) : []);
   const loadTerms = () => { terms = $("terms").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean); };
   loadTerms();
   $("terms").addEventListener("change", () => { store.set("acTerms", $("terms").value); loadTerms(); });
@@ -80,7 +100,7 @@
       const text = await Word.run(async ctx => { const b = ctx.document.body; b.load("text"); await ctx.sync(); return b.text; });
       const m = new Map();
       (text.match(/[A-Za-z][A-Za-z'’-]{3,}/g) || []).forEach(w => { const k = w.toLowerCase(); m.set(k, (m.get(k) || 0) + 1); });
-      docWords = m;
+      docWords = m; updDiag();
     } catch (e) {}
   }
   $("refresh").onclick = async () => { await learnDoc(); $("status").textContent = docWords.size + " words learned from this document."; };
@@ -92,12 +112,12 @@
     const out = [], seen = new Set(), add = (c, tail, src) => { if (c && !seen.has(c)) { seen.add(c); out.push({ c, tail, src }); } };
     const words = before.split(/\s+/);
     // 1) your own terms and phrases: match the end of what you typed against the start of each term
-    terms.forEach(term => {
+    termList().forEach(([term, srcName]) => {
       const tl = term.toLowerCase();
       for (let n = 1; n <= 4; n++) {
         const tail = words.slice(-n).join(" ");
         if (tail.trim().length < 2) continue;
-        if (tl.startsWith(tail.toLowerCase()) && tl.length > tail.length) { add(term.slice(tail.length), tail, "your list"); break; }
+        if (tl.startsWith(tail.toLowerCase()) && tl.length > tail.length) { add(term.slice(tail.length), tail, srcName); break; }
       }
     });
     // 2) words already in this document
@@ -115,7 +135,7 @@
       '<button class="sug' + (i === 0 ? " top" : "") + '" data-i="' + i + '"><span class="n">' + (i + 1) + '</span><span class="t">' +
       esc(s.tail.slice(-18)) + "<b>" + esc(s.c) + '</b></span><span class="src">' + (i === 0 ? "★ " : "") + esc(s.src) + "</span></button>").join("");
     $("list").querySelectorAll("button[data-i]").forEach(b => b.onclick = () => insertCompletion(suggestions[+b.dataset.i].c));
-    if (!suggestions.length) $("status").textContent = "";
+    if (!suggestions.length) $("list").innerHTML = '<div class="hint">No suggestions for the end of this text yet. Keep typing, add your own terms in Settings, or tick AI phrase suggestions.</div>';
   }
 
   async function readContext() {
@@ -127,18 +147,24 @@
     });
   }
 
-  function onCaret() {
-    clearTimeout(evTimer);
-    evTimer = setTimeout(async () => {
-      const my = ++req; let c;
-      try { c = await readContext(); } catch (e) { return; }
-      if (my !== req || !c.empty) return;                // keep the list while text is selected
-      const before = c.before;
-      $("ctx").textContent = before ? "…" + before.slice(-60) : "Start of paragraph";
-      suggestions = localSuggest(before); render();
-      if ($("ai").checked && before.trim().length >= 12) { clearTimeout(aiTimer); aiTimer = setTimeout(() => aiSuggest(before, my), 600); }
-    }, 250);
+  let lastEventAt = 0, lastBefore = null, evCount = 0;
+  function updDiag() {
+    $("diag").textContent = "caret events: " + evCount + " · your terms: " + terms.length + " · built-in: " + ($("builtin").checked ? BUILTIN.length : 0) + " · document words: " + docWords.size;
   }
+  function onCaret() { lastEventAt = Date.now(); evCount++; clearTimeout(evTimer); evTimer = setTimeout(() => refresh(true), 250); }
+
+  async function refresh(force) {
+    let c;
+    try { c = await readContext(); } catch (e) { $("diag").textContent = "Cannot read the document: " + e.message; return; }
+    if (!c.empty) return;                                    // keep the list while text is selected
+    if (!force && c.before === lastBefore) return;           // nothing new
+    lastBefore = c.before; const before = c.before, my = ++req;
+    $("ctx").textContent = before ? "…" + before.slice(-60) : "Start of paragraph";
+    suggestions = localSuggest(before); render(); updDiag();
+    if ($("ai").checked && before.trim().length >= 12) { clearTimeout(aiTimer); aiTimer = setTimeout(() => aiSuggest(before, my), 600); }
+  }
+  // some Word versions don't send an event for every keystroke, so also check once a second
+  setInterval(() => { if (document.visibilityState === "visible" && Date.now() - lastEventAt > 1000) refresh(false); }, 1000);
 
   async function insertCompletion(text) {
     try {
@@ -210,7 +236,7 @@
   if (typeof Office !== "undefined" && Office.onReady) Office.onReady(i => {
     if (i && i.host) {
       Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onCaret);
-      watchAccept(); learnDoc(); setInterval(learnDoc, 60000); onCaret();
+      watchAccept(); learnDoc(); setInterval(learnDoc, 60000); refresh(true);
     } else $("ctx").textContent = "Open this pane inside Word.";
   });
 </script>
